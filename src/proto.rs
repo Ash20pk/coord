@@ -20,6 +20,16 @@ pub enum Event {
     IntentDeclared { session: String, text: String, ts: Ts },
     ClaimAcquired { session: String, user: String, path: String, lease_until: Ts, intent: String },
     ClaimReleased { session: String, path: String, ts: Ts },
+    /// A blocked edit attempt. Carries no state change, but it is the signal
+    /// that matters: it makes collisions visible and measurable.
+    ClaimDenied {
+        session: String,
+        user: String,
+        path: String,
+        holder: String,
+        holder_user: String,
+        ts: Ts,
+    },
     FileWritten { session: String, path: String, ts: Ts },
     SessionEnded { session: String, ts: Ts },
 }
@@ -147,6 +157,7 @@ impl View {
                     s.last_seen = *ts;
                 }
             }
+            Event::ClaimDenied { .. } => {} // observability only
             Event::SessionEnded { session, .. } => {
                 self.claims.retain(|c| c.session != *session);
                 self.sessions.remove(session);

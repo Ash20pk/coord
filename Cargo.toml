@@ -17,6 +17,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 dirs = "5"
 uuid = { version = "1", features = ["v4"] }
 toml = "0.8"
+terminal_size = "0.3"
 
 [profile.release]
 lto = true

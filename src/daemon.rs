@@ -80,8 +80,31 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             };
             let path = rel_path(&repo_root, &path);
 
-            // Hot path: local mirror check, microseconds.
-            if let Some(c) = rc.view.lock().unwrap().conflicting(&session, &path).cloned() {
+            // Hot path: local mirror check, microseconds. When it fires we
+            // answer without troubling the relay — but the collision still has
+            // to reach the log, or denials caught locally stay invisible.
+            let local = {
+                let v = rc.view.lock().unwrap();
+                v.conflicting(&session, &path).cloned().map(|c| {
+                    let user = v
+                        .sessions
+                        .get(&session)
+                        .map(|s| s.user.clone())
+                        .unwrap_or_else(whoami);
+                    (c, user)
+                })
+            };
+            if let Some((c, user)) = local {
+                let _ = rc.tx.send(ClientMsg::Append {
+                    event: Event::ClaimDenied {
+                        session: session.clone(),
+                        user,
+                        path: path.clone(),
+                        holder: c.session.clone(),
+                        holder_user: c.user.clone(),
+                        ts: now_ms(),
+                    },
+                });
                 return deny(&path, &c);
             }
 

@@ -160,6 +160,19 @@ async fn client(sock: WebSocket, app: Arc<App>) -> Result<()> {
                 };
                 match verdict {
                     Some(holder) => {
+                        // Record the collision before answering — this is the
+                        // number the whole product exists to reduce.
+                        app.commit(
+                            &repo,
+                            Event::ClaimDenied {
+                                session: session.clone(),
+                                user: user.clone(),
+                                path: path.clone(),
+                                holder: holder.session.clone(),
+                                holder_user: holder.user.clone(),
+                                ts: now_ms(),
+                            },
+                        );
                         let _ = out_tx.send(ServerMsg::ClaimResp {
                             id,
                             granted: false,

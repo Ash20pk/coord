@@ -1,4 +1,4 @@
-use coord::{config, daemon, hook, proto, relay};
+use coord::{config, daemon, hook, proto, relay, watch};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -37,6 +37,8 @@ enum Cmd {
     },
     /// Show active sessions and claims on this repo
     Who,
+    /// Live dashboard of sessions, claims, and collisions on this repo
+    Watch,
 }
 
 #[tokio::main]
@@ -53,6 +55,11 @@ async fn main() -> Result<()> {
         }
         Cmd::Init { relay, repo } => init(relay, repo),
         Cmd::Who => who(),
+        Cmd::Watch => {
+            let root = config::find_repo_root(&std::env::current_dir()?)
+                .context("no .coord.toml found — run `coord init` first")?;
+            watch::run(root).await
+        }
     }
 }
 

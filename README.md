@@ -38,6 +38,40 @@ Restart your Claude Code sessions in that repo. Then:
 coord who      # who's active, what they're doing, what they hold
 ```
 
+## The lab — see it in front of you
+
+```sh
+cargo build --release
+./lab/lab.sh              # start (or re-attach)
+./lab/lab.sh reset        # wipe repo state + event log, then start
+./lab/lab.sh kill         # tear it all down
+```
+
+One tmux window: four Claude Code sessions in a 2x2 grid — `ash`, `priya`,
+`sam`, `ci-bot` — over a live dashboard.
+
+```
+┌── agent: ash ───────────────┬── agent: sam ───────────────┐
+│                             │                             │
+├── agent: priya ─────────────┼── agent: ci-bot ────────────┤
+│                             │                             │
+├── coord watch ──────────────┴─────────────────────────────┤
+│ coord ●  coordlab   4 session(s)  3 claim(s)  blocked 2   │
+│ USER      SESSION   INTENT                    HOLDS       │
+│ ash       a1b2c3d4  Refactor src/auth.js…     src/auth.js │
+│ priya     c9d0e1f2  Add refreshSession…       —           │
+│ ─────────────────────────────────────────────────────────  │
+│ 21:02:56  ash       claim   src/auth.js                    │
+│ 21:02:56  priya     BLOCKED src/auth.js (held by ash)      │
+└────────────────────────────────────────────────────────────┘
+```
+
+`TASKS.md` in the lab repo has four tasks to paste in — the first two collide on
+`src/auth.js` on purpose. Wants a terminal at least 150x40; `ctrl-b z` zooms a
+pane, `ctrl-b arrow` moves between them.
+
+`coord watch` works in any repo, not just the lab.
+
 ## Testing it with two sessions on one machine
 
 You don't need two OS users. Sessions are distinguished by Claude Code's own
