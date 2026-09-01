@@ -80,33 +80,23 @@ async fn malformed_daemon_request_is_an_error_not_a_hang() {
 }
 
 #[tokio::test]
-async fn daemon_survives_relay_restart_and_rebuilds_its_mirror() {
-    let db = tmp("restart-db").join("relay.db");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener); // free the port, then claim it for the first relay
-
-    let url = format!("ws://{addr}/ws");
-    coord::relay::start(&addr.to_string(), db.clone()).await.unwrap();
-
+async fn daemon_mirror_reflects_claims_made_by_other_clients() {
+    // A claim taken by some other daemon must show up in this daemon's local
+    // mirror and be enforced from there. (Relay *restart* is a different
+    // property — see tests/e2e.rs::relay_restart_is_survived_by_the_daemon.)
+    let url = start_relay().await;
     let sock = start_daemon().await;
-    let root = tmp("restart");
-    init_repo(&root, &url, "restart-repo");
+    let root = tmp("mirror");
+    init_repo(&root, &url, "mirror-repo");
 
-    // Session A (via a raw client) claims the file; the daemon should learn it.
-    let mut a = Client::connect(&url, "restart-repo").await;
+    let mut a = Client::connect(&url, "mirror-repo").await;
     assert!(a.request_claim("sessA", "src/auth.ts", "refactor auth").await);
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     let r = ask(&sock, prewrite(&root, "sessB", "src/auth.ts")).await;
     assert!(denied_reason(&r).is_some(), "daemon mirror should reflect the peer's claim");
-
-    // Kill the relay by dropping its connections: simulate with a new relay on
-    // the same port after the old one is gone is not possible in-process, so
-    // instead assert the daemon keeps serving (fail-open) while the peer holds.
-    // The reconnect path itself is covered by relay_down_means_allow.
     let r2 = ask(&sock, prewrite(&root, "sessB", "src/other.ts")).await;
-    assert!(allowed(&r2), "unrelated files stay editable throughout");
+    assert!(allowed(&r2), "unrelated files stay editable");
 }
 
 #[tokio::test]

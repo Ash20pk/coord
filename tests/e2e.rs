@@ -63,18 +63,28 @@ fn edit(root: &PathBuf, session: &str, rel: &str, event: &str) -> Value {
 }
 
 async fn scenario(tag: &str) -> (PathBuf, PathBuf) {
+    let (sock, root, _url) = scenario_with_relay(tag).await;
+    (sock, root)
+}
+
+async fn scenario_with_relay(tag: &str) -> (PathBuf, PathBuf, String) {
     let url = start_relay().await;
     let sock = start_daemon().await;
     let root = tmp(tag);
     init_repo(&root, &url, &format!("e2e-{tag}"));
-    (sock, root)
+    (sock, root, url)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn allowed_edit_produces_no_output() {
-    let (sock, root) = scenario("allow").await;
+async fn allowed_edit_produces_no_output_and_records_a_claim() {
+    let (sock, root, url) = scenario_with_relay("allow").await;
     let out = hook(&sock, edit(&root, "sessA", "src/auth.ts", "PreToolUse"));
     assert!(out.is_none(), "an allowed edit must print nothing, got {out:?}");
+    // Without this the test would also pass with the daemon unreachable.
+    assert!(
+        relay_holds_claim(&url, "e2e-allow", "src/auth.ts").await,
+        "silence must mean 'claimed', not 'coordination unreachable'"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -146,11 +156,11 @@ async fn first_session_gets_no_presence_noise() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn non_write_tools_are_never_gated() {
+async fn read_only_tools_are_never_gated() {
     let (sock, root) = scenario("readonly").await;
     hook(&sock, edit(&root, "sessA", "src/auth.ts", "PreToolUse")); // A claims it
 
-    for tool in ["Read", "Grep", "Glob", "Bash", "WebFetch"] {
+    for tool in ["Read", "Grep", "Glob", "WebFetch"] {
         let out = hook(&sock, json!({
             "hook_event_name": "PreToolUse", "session_id": "sessB",
             "cwd": root.to_string_lossy(), "tool_name": tool,
@@ -158,6 +168,97 @@ async fn non_write_tools_are_never_gated() {
         }));
         assert!(out.is_none(), "{tool} must never be blocked, got {out:?}");
     }
+}
+
+/// KNOWN GAP, kept red on purpose. A Bash command that writes a claimed file
+/// is not gated, so any session preferring `sed`/heredocs over the Edit tool
+/// (Claude Code's auto mode does) walks straight past coord. Observed live in
+/// the lab: a session wrote src/auth.js via Bash with zero recorded events.
+/// Un-ignore when Bash write detection lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "known gap: Bash writes bypass claims (auto mode uses Bash for edits)"]
+async fn bash_write_to_a_claimed_file_is_blocked() {
+    let (sock, root) = scenario("bashgap").await;
+    hook(&sock, edit(&root, "sessA", "src/auth.ts", "PreToolUse")); // A claims it
+
+    let target = format!("{}/src/auth.ts", root.to_string_lossy());
+    for cmd in [
+        format!("sed -i '' 's/a/b/' {target}"),
+        format!("echo x >> {target}"),
+        format!("cat > {target} <<'EOF'\nhi\nEOF"),
+        format!("tee {target} < /dev/null"),
+    ] {
+        let out = hook(&sock, json!({
+            "hook_event_name": "PreToolUse", "session_id": "sessB",
+            "cwd": root.to_string_lossy(), "tool_name": "Bash",
+            "tool_input": { "command": cmd }
+        }));
+        assert!(out.is_some(), "Bash write must be gated like Edit: {cmd}");
+    }
+}
+
+/// The real thing the misnamed failure test claimed to cover: kill the relay
+/// process, bring it back, and the daemon must reconnect and enforce again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relay_restart_is_survived_by_the_daemon() {
+    use std::net::TcpListener;
+    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let addr = format!("127.0.0.1:{port}");
+    let url = format!("ws://{addr}/ws");
+    let db = tmp("restart-db").join("relay.db");
+
+    let spawn_relay = || {
+        Command::new(BIN)
+            .args(["relay", "--listen", &addr, "--db", &db.to_string_lossy()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let wait_up = || {
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(&addr).is_ok() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("relay did not come up on {addr}");
+    };
+
+    let mut relay = spawn_relay();
+    wait_up();
+    let sock = start_daemon().await;
+    let root = tmp("restart");
+    init_repo(&root, &url, "restart-repo");
+
+    // Before: coordination works.
+    assert!(hook(&sock, edit(&root, "sessA", "src/auth.ts", "PreToolUse")).is_none());
+    assert!(hook(&sock, edit(&root, "sessB", "src/auth.ts", "PreToolUse")).is_some());
+
+    // Kill the relay. The daemon must fail open, not hang or crash.
+    relay.kill().unwrap();
+    relay.wait().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        hook(&sock, edit(&root, "sessB", "src/other.ts", "PreToolUse")).is_none(),
+        "relay down must fail open"
+    );
+
+    // Bring it back (fresh state — leases are the safety net, not persistence).
+    let mut relay = spawn_relay();
+    wait_up();
+    // Daemon reconnects with 3s backoff; give it room.
+    let mut enforced = false;
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        hook(&sock, edit(&root, "sessA", "src/auth.ts", "PreToolUse"));
+        if hook(&sock, edit(&root, "sessB", "src/auth.ts", "PreToolUse")).is_some() {
+            enforced = true;
+            break;
+        }
+    }
+    relay.kill().ok();
+    assert!(enforced, "daemon must reconnect after relay restart and enforce again");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

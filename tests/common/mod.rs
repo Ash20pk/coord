@@ -159,3 +159,18 @@ pub async fn start_black_hole_relay() -> String {
     });
     format!("ws://{addr}/ws")
 }
+
+/// Positive control for "allowed" assertions. Fail-open makes an empty answer
+/// ambiguous — coordination working, or coordination unreachable — so an
+/// allow is only meaningful if the relay actually recorded the claim.
+pub async fn relay_holds_claim(url: &str, repo: &str, path: &str) -> bool {
+    let (mut ws, _) = connect_async(url).await.unwrap();
+    let hello = ClientMsg::Hello { repo: repo.into(), daemon: "probe".into() };
+    ws.send(WsMsg::Text(serde_json::to_string(&hello).unwrap())).await.unwrap();
+    while let Some(Ok(WsMsg::Text(t))) = ws.next().await {
+        if let Ok(ServerMsg::Welcome { claims, .. }) = serde_json::from_str(&t) {
+            return claims.iter().any(|c| c.path == path);
+        }
+    }
+    false
+}

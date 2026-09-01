@@ -118,6 +118,23 @@ Four layers:
 | Failure | `tests/failure.rs` | fail-open on dead daemon, dead relay, unresponsive relay, malformed input; crash recovery via lease expiry |
 | Contract | `tests/e2e.rs` | real Claude Code hook payloads through the binary; exact deny/context JSON; latency ceiling |
 
-Not covered by the suite, and deliberately so: whether the conflict brief actually
-persuades a model to re-plan. That needs adversarial dogfooding with two live
-sessions on overlapping tasks.
+One test is kept **red on purpose**: `bash_write_to_a_claimed_file_is_blocked`
+(`#[ignore]`d) specifies behaviour v1 does not have. See Known gaps.
+
+## Known gaps (found by running real sessions, not by the suite)
+
+- **Bash writes bypass claims.** Only Write/Edit/MultiEdit/NotebookEdit are
+  gated. A session that edits via `sed`, `tee`, or heredocs walks straight past
+  coord — and Claude Code's auto mode prefers Bash for edits. Observed live in
+  the lab: a session modified a claimed file with zero recorded events. In
+  `acceptEdits` mode, where the model uses the Edit tool, gating works.
+- **Presence goes stale.** Peer context is injected once at SessionStart and
+  never refreshed, so a session can reason about peers that left minutes ago.
+- **Fail-open is ambiguous by design.** An allowed edit and an unreachable
+  daemon look identical from the agent's side. Tests use a positive control
+  (the relay must hold the claim) to tell them apart; humans should check
+  `coord watch` shows a green dot.
+
+Not testable by the suite at all: whether the conflict brief persuades a model
+to re-plan. One live run says yes (session prepared its patch and waited, no
+bypass attempt); N=1.
