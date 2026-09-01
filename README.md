@@ -43,3 +43,22 @@ coord who      # who's active, what they're doing, what they hold
 v1 — shared-tree claims mode. Planned: fleet mode (worktree isolation +
 agent-driven merge queue), semantic claims (symbol-level via tree-sitter),
 dashboard/audit surface over the event log.
+
+## Tests
+
+```sh
+cargo test          # 44 tests, ~2s
+```
+
+Four layers:
+
+| Layer | File | What it protects |
+|---|---|---|
+| Unit | `src/proto.rs` | path-overlap boundaries (`src/auth` vs `src/auth2`), lease expiry, log-replay determinism |
+| Arbitration | `tests/arbitration.rs` | 400+ concurrent races → exactly one winner; conflict briefs carry holder + intent; repo isolation |
+| Failure | `tests/failure.rs` | fail-open on dead daemon, dead relay, unresponsive relay, malformed input; crash recovery via lease expiry |
+| Contract | `tests/e2e.rs` | real Claude Code hook payloads through the binary; exact deny/context JSON; latency ceiling |
+
+Not covered by the suite, and deliberately so: whether the conflict brief actually
+persuades a model to re-plan. That needs adversarial dogfooding with two live
+sessions on overlapping tasks.

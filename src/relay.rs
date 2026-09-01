@@ -43,7 +43,19 @@ impl App {
     }
 }
 
-pub async fn run(listen: String, db_path: PathBuf) -> Result<()> {
+/// Bind and serve in the background; returns the actual bound address.
+/// Used by tests (port 0) and by `run`.
+pub async fn start(listen: &str, db_path: PathBuf) -> Result<std::net::SocketAddr> {
+    let (listener, app) = prepare(listen, db_path).await?;
+    let addr = listener.local_addr()?;
+    let router = Router::new().route("/ws", get(ws_handler)).with_state(app);
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    Ok(addr)
+}
+
+async fn prepare(listen: &str, db_path: PathBuf) -> Result<(tokio::net::TcpListener, Arc<App>)> {
     if let Some(dir) = db_path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -54,10 +66,14 @@ pub async fn run(listen: String, db_path: PathBuf) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_events_repo_seq ON events (repo, seq);",
     )?;
-
     let app = Arc::new(App { repos: Mutex::new(HashMap::new()), db: Mutex::new(conn) });
+    let listener = tokio::net::TcpListener::bind(listen).await?;
+    Ok((listener, app))
+}
+
+pub async fn run(listen: String, db_path: PathBuf) -> Result<()> {
+    let (listener, app) = prepare(&listen, db_path.clone()).await?;
     let router = Router::new().route("/ws", get(ws_handler)).with_state(app);
-    let listener = tokio::net::TcpListener::bind(&listen).await?;
     eprintln!("coord relay listening on ws://{listen}/ws (audit log: {})", db_path.display());
     axum::serve(listener, router).await?;
     Ok(())

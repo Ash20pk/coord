@@ -124,9 +124,16 @@ fn git_branch(cwd: &str) -> String {
 }
 
 pub fn call_daemon(req: &DReq) -> Option<DResp> {
-    let sock = daemon::socket_path();
+    call_daemon_at(&daemon::socket_path(), req)
+}
+
+/// Talk to a daemon at an explicit socket path. Returns None on any failure —
+/// every caller treats None as "allow" (fail open).
+pub fn call_daemon_at(sock: &std::path::Path, req: &DReq) -> Option<DResp> {
     let mut stream = UnixStream::connect(sock).ok()?;
-    stream.set_read_timeout(Some(Duration::from_millis(900))).ok()?;
+    // Must exceed the daemon's own worst case (cold-start wait + claim timeout)
+    // so we get its explicit fail-open verdict rather than timing out blind.
+    stream.set_read_timeout(Some(Duration::from_millis(1_500))).ok()?;
     stream.set_write_timeout(Some(Duration::from_millis(200))).ok()?;
     let mut line = serde_json::to_string(req).ok()?;
     line.push('\n');

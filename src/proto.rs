@@ -176,3 +176,219 @@ pub enum DResp {
     Ok,
     Err { msg: String },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn claim(session: &str, path: &str, lease_until: Ts) -> Claim {
+        Claim {
+            session: session.into(),
+            user: "u".into(),
+            path: path.into(),
+            lease_until,
+            intent: "i".into(),
+        }
+    }
+
+    // ---------- paths_overlap ----------
+
+    #[test]
+    fn overlap_identical() {
+        assert!(paths_overlap("src/auth.ts", "src/auth.ts"));
+    }
+
+    #[test]
+    fn overlap_dir_contains_file_both_directions() {
+        assert!(paths_overlap("src/auth", "src/auth/session.ts"));
+        assert!(paths_overlap("src/auth/session.ts", "src/auth"));
+    }
+
+    #[test]
+    fn overlap_deep_nesting() {
+        assert!(paths_overlap("src", "src/a/b/c/d.ts"));
+    }
+
+    /// The classic prefix trap: `src/auth` must NOT claim `src/auth2`.
+    #[test]
+    fn no_overlap_on_partial_segment() {
+        assert!(!paths_overlap("src/auth", "src/auth2"));
+        assert!(!paths_overlap("src/auth2", "src/auth"));
+        assert!(!paths_overlap("src/auth.ts", "src/auth.tsx"));
+        assert!(!paths_overlap("a/b", "a/bc/d"));
+    }
+
+    #[test]
+    fn no_overlap_siblings() {
+        assert!(!paths_overlap("src/auth.ts", "src/billing.ts"));
+        assert!(!paths_overlap("src/a/x.ts", "src/b/x.ts"));
+    }
+
+    #[test]
+    fn overlap_is_symmetric_over_samples() {
+        let samples = [
+            "src", "src/auth", "src/auth2", "src/auth/session.ts", "src/auth.ts", "lib/x", "",
+        ];
+        for a in samples {
+            for b in samples {
+                assert_eq!(
+                    paths_overlap(a, b),
+                    paths_overlap(b, a),
+                    "asymmetric for {a:?} / {b:?}"
+                );
+            }
+        }
+    }
+
+    // ---------- lease expiry ----------
+
+    #[test]
+    fn expired_claim_is_invisible_and_pruned() {
+        let mut v = View::default();
+        v.claims.push(claim("other", "src/auth.ts", now_ms() - 1));
+        assert!(v.conflicting("me", "src/auth.ts").is_none(), "expired lease must not block");
+        v.prune();
+        assert!(v.claims.is_empty(), "expired lease must be pruned");
+    }
+
+    #[test]
+    fn live_claim_by_other_blocks_but_own_does_not() {
+        let mut v = View::default();
+        v.claims.push(claim("other", "src/auth.ts", now_ms() + LEASE_MS));
+        assert!(v.conflicting("me", "src/auth.ts").is_some());
+        assert!(v.conflicting("other", "src/auth.ts").is_none(), "own claim must not block self");
+    }
+
+    #[test]
+    fn dir_claim_blocks_nested_file() {
+        let mut v = View::default();
+        v.claims.push(claim("other", "src/auth", now_ms() + LEASE_MS));
+        assert!(v.conflicting("me", "src/auth/session.ts").is_some());
+        assert!(v.conflicting("me", "src/auth2/session.ts").is_none());
+    }
+
+    // ---------- View::apply ----------
+
+    #[test]
+    fn session_lifecycle_and_intent() {
+        let mut v = View::default();
+        v.apply(&Event::SessionStarted {
+            session: "s1".into(),
+            user: "ash".into(),
+            branch: "main".into(),
+            ts: now_ms(),
+        });
+        assert_eq!(v.sessions.len(), 1);
+        v.apply(&Event::IntentDeclared {
+            session: "s1".into(),
+            text: "refactor auth".into(),
+            ts: now_ms(),
+        });
+        assert_eq!(v.sessions["s1"].intent, "refactor auth");
+        assert_eq!(v.sessions["s1"].branch, "main");
+    }
+
+    #[test]
+    fn intent_for_unknown_session_is_ignored() {
+        let mut v = View::default();
+        v.apply(&Event::IntentDeclared { session: "ghost".into(), text: "x".into(), ts: now_ms() });
+        assert!(v.sessions.is_empty());
+    }
+
+    #[test]
+    fn claim_acquired_twice_renews_rather_than_duplicates() {
+        let mut v = View::default();
+        let first = now_ms() + 1_000;
+        let second = now_ms() + 60_000;
+        for lease_until in [first, second] {
+            v.apply(&Event::ClaimAcquired {
+                session: "s1".into(),
+                user: "ash".into(),
+                path: "src/auth.ts".into(),
+                lease_until,
+                intent: "i".into(),
+            });
+        }
+        assert_eq!(v.claims.len(), 1, "same session+path must renew, not duplicate");
+        assert_eq!(v.claims[0].lease_until, second);
+    }
+
+    #[test]
+    fn release_removes_only_that_sessions_claim() {
+        let mut v = View::default();
+        v.claims.push(claim("s1", "src/a.ts", now_ms() + LEASE_MS));
+        v.claims.push(claim("s2", "src/b.ts", now_ms() + LEASE_MS));
+        v.apply(&Event::ClaimReleased { session: "s1".into(), path: "src/a.ts".into(), ts: now_ms() });
+        assert_eq!(v.claims.len(), 1);
+        assert_eq!(v.claims[0].session, "s2");
+    }
+
+    #[test]
+    fn release_of_nonexistent_claim_is_a_noop() {
+        let mut v = View::default();
+        v.claims.push(claim("s1", "src/a.ts", now_ms() + LEASE_MS));
+        v.apply(&Event::ClaimReleased { session: "s1".into(), path: "nope.ts".into(), ts: now_ms() });
+        assert_eq!(v.claims.len(), 1);
+    }
+
+    #[test]
+    fn file_written_renews_only_covering_leases_of_that_session() {
+        let mut v = View::default();
+        let soon = now_ms() + 1_000;
+        v.claims.push(claim("s1", "src/auth", soon));      // covers the write
+        v.claims.push(claim("s1", "lib/other.ts", soon));  // does not cover
+        v.claims.push(claim("s2", "src/auth", soon));       // other session
+        let ts = now_ms();
+        v.apply(&Event::FileWritten { session: "s1".into(), path: "src/auth/session.ts".into(), ts });
+
+        let get = |s: &str, p: &str| {
+            v.claims.iter().find(|c| c.session == s && c.path == p).unwrap().lease_until
+        };
+        assert_eq!(get("s1", "src/auth"), ts + LEASE_MS, "covering lease must renew");
+        assert_eq!(get("s1", "lib/other.ts"), soon, "unrelated lease must not renew");
+        assert_eq!(get("s2", "src/auth"), soon, "other session's lease must not renew");
+    }
+
+    #[test]
+    fn session_ended_sweeps_all_its_claims_and_presence() {
+        let mut v = View::default();
+        v.apply(&Event::SessionStarted {
+            session: "s1".into(),
+            user: "ash".into(),
+            branch: "main".into(),
+            ts: now_ms(),
+        });
+        v.claims.push(claim("s1", "src/a.ts", now_ms() + LEASE_MS));
+        v.claims.push(claim("s1", "src/b.ts", now_ms() + LEASE_MS));
+        v.claims.push(claim("s2", "src/c.ts", now_ms() + LEASE_MS));
+        v.apply(&Event::SessionEnded { session: "s1".into(), ts: now_ms() });
+        assert!(v.sessions.is_empty());
+        assert_eq!(v.claims.len(), 1);
+        assert_eq!(v.claims[0].session, "s2");
+    }
+
+    /// Replaying the same log in order must always yield the same view.
+    #[test]
+    fn log_replay_is_deterministic() {
+        let log = vec![
+            Event::SessionStarted { session: "s1".into(), user: "a".into(), branch: "m".into(), ts: 1 },
+            Event::IntentDeclared { session: "s1".into(), text: "auth".into(), ts: 2 },
+            Event::ClaimAcquired {
+                session: "s1".into(), user: "a".into(), path: "src/auth.ts".into(),
+                lease_until: now_ms() + LEASE_MS, intent: "auth".into(),
+            },
+            Event::SessionStarted { session: "s2".into(), user: "b".into(), branch: "m".into(), ts: 3 },
+            Event::FileWritten { session: "s1".into(), path: "src/auth.ts".into(), ts: now_ms() },
+            Event::ClaimReleased { session: "s1".into(), path: "src/auth.ts".into(), ts: 4 },
+        ];
+        let build = || {
+            let mut v = View::default();
+            for e in &log {
+                v.apply(e);
+            }
+            (v.claims.len(), v.sessions.len())
+        };
+        assert_eq!(build(), build());
+        assert_eq!(build(), (0, 2));
+    }
+}

@@ -11,8 +11,13 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
 const CLAIM_TIMEOUT_MS: u64 = 500; // relay slower than this → fail open
+const COLD_START_WAIT_MS: u64 = 400; // first-connection snapshot wait, then fail open
 
 pub fn socket_path() -> PathBuf {
+    // COORD_SOCK lets tests (and multi-instance setups) use an isolated socket.
+    if let Ok(p) = std::env::var("COORD_SOCK") {
+        return PathBuf::from(p);
+    }
     dirs::home_dir().unwrap().join(".coord").join("coordd.sock")
 }
 
@@ -20,6 +25,9 @@ struct RepoConn {
     tx: mpsc::UnboundedSender<ClientMsg>,
     view: Arc<Mutex<View>>,
     connected: Arc<Mutex<bool>>,
+    /// True once a Welcome snapshot has been applied, i.e. the mirror is
+    /// trustworthy. Until then we must not answer from an empty view.
+    ready: Arc<Mutex<bool>>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<ServerMsg>>>>,
 }
 
@@ -29,7 +37,11 @@ struct Daemon {
 }
 
 pub async fn run() -> Result<()> {
-    let sock = socket_path();
+    run_on(socket_path()).await
+}
+
+/// Serve the daemon API on an explicit socket path (tests use isolated sockets).
+pub async fn run_on(sock: PathBuf) -> Result<()> {
     std::fs::create_dir_all(sock.parent().unwrap())?;
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock)?;
@@ -80,15 +92,16 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             let id = uuid::Uuid::new_v4().to_string();
             let (tx, rx) = oneshot::channel();
             rc.pending.lock().unwrap().insert(id.clone(), tx);
-            let intent = rc
-                .view
-                .lock()
-                .unwrap()
-                .sessions
-                .get(&session)
-                .map(|s| s.intent.clone())
-                .unwrap_or_default();
-            let user = whoami();
+            // Identity and intent must come from the owning session's record,
+            // not from this daemon's environment — a daemon may serve sessions
+            // started under a different user, and the brief names the holder.
+            let (intent, user) = {
+                let v = rc.view.lock().unwrap();
+                match v.sessions.get(&session) {
+                    Some(s) => (s.intent.clone(), s.user.clone()),
+                    None => (String::new(), whoami()),
+                }
+            };
             let _ = rc.tx.send(ClientMsg::ClaimReq { id: id.clone(), session, user, path: path.clone(), intent });
             match tokio::time::timeout(std::time::Duration::from_millis(CLAIM_TIMEOUT_MS), rx).await {
                 Ok(Ok(ServerMsg::ClaimResp { granted: false, holder, holder_user, holder_intent, lease_until, .. })) => {
@@ -197,10 +210,21 @@ async fn ensure_repo(d: &Arc<Daemon>, repo_root: &str) -> Option<Arc<RepoConn>> 
         tx,
         view: Arc::new(Mutex::new(View::default())),
         connected: Arc::new(Mutex::new(false)),
+        ready: Arc::new(Mutex::new(false)),
         pending: Arc::new(Mutex::new(HashMap::new())),
     });
     d.repos.lock().unwrap().insert(repo_root.to_string(), rc.clone());
     tokio::spawn(relay_loop(cfg, rc.clone(), rx));
+
+    // Cold start: give the relay a bounded moment to deliver the first
+    // snapshot, so the very first edit in a repo is still arbitrated. If the
+    // relay is unreachable we fall through and fail open, as designed.
+    for _ in 0..COLD_START_WAIT_MS / 10 {
+        if *rc.ready.lock().unwrap() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     Some(rc)
 }
 
@@ -227,9 +251,12 @@ async fn relay_loop(cfg: RepoConfig, rc: Arc<RepoConn>, mut rx: mpsc::UnboundedR
                             let Ok(sm) = serde_json::from_str::<ServerMsg>(&t) else { continue };
                             match sm {
                                 ServerMsg::Welcome { claims, sessions, .. } => {
-                                    let mut v = rc.view.lock().unwrap();
-                                    v.claims = claims;
-                                    v.sessions = sessions.into_iter().map(|s| (s.session.clone(), s)).collect();
+                                    {
+                                        let mut v = rc.view.lock().unwrap();
+                                        v.claims = claims;
+                                        v.sessions = sessions.into_iter().map(|s| (s.session.clone(), s)).collect();
+                                    }
+                                    *rc.ready.lock().unwrap() = true;
                                 }
                                 ServerMsg::Event { event, .. } => {
                                     rc.view.lock().unwrap().apply(&event);

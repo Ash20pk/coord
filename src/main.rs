@@ -1,8 +1,4 @@
-mod config;
-mod daemon;
-mod hook;
-mod proto;
-mod relay;
+use coord::{config, daemon, hook, proto, relay};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
