@@ -25,6 +25,7 @@ struct State {
     connected: bool,
     denials: u64,
     writes: u64,
+    ungated: u64,
 }
 
 pub async fn run(repo_root: std::path::PathBuf) -> Result<()> {
@@ -35,6 +36,7 @@ pub async fn run(repo_root: std::path::PathBuf) -> Result<()> {
         connected: false,
         denials: 0,
         writes: 0,
+        ungated: 0,
     }));
 
     let s2 = st.clone();
@@ -77,6 +79,7 @@ async fn stream(cfg: RepoConfig, st: Arc<Mutex<State>>) {
                             }
                             match event {
                                 Event::ClaimDenied { .. } => s.denials += 1,
+                                Event::UngatedWrite { .. } => s.ungated += 1,
                                 Event::FileWritten { .. } => s.writes += 1,
                                 _ => {}
                             }
@@ -115,6 +118,13 @@ fn describe(e: &Event) -> Option<String> {
         Event::ClaimAcquired { user, path, .. } => {
             format!("{DIM}{}{R}  {CYAN}{:<9}{R} {GREEN}claim {R}  {}", clock(now_ms()), user, path)
         }
+        Event::UngatedWrite { user, path, holder_user, ts, .. } => format!(
+            "{DIM}{}{R}  {CYAN}{:<9}{R} {RED}UNGATED{R} {} {DIM}(wrote over {}){R}",
+            clock(*ts),
+            user,
+            path,
+            holder_user
+        ),
         Event::ClaimDenied { user, path, holder_user, ts, .. } => format!(
             "{DIM}{}{R}  {CYAN}{:<9}{R} {RED}BLOCKED{R} {} {DIM}(held by {}){R}",
             clock(*ts),
@@ -149,14 +159,16 @@ fn render(s: &State, cfg: &RepoConfig) -> String {
     let live = s.view.sessions.len();
     out.push_str(&format!(
         "{BOLD}coord{R} {}  {DIM}{}{R}   {BOLD}{}{R} session(s)   {BOLD}{}{R} claim(s)   \
-         writes {BOLD}{}{R}   blocked {BOLD}{}{}{R}\n",
+         writes {BOLD}{}{R}   blocked {BOLD}{}{}{R}   ungated {BOLD}{}{}{R}\n",
         dot,
         cfg.repo,
         live,
         s.view.claims.len(),
         s.writes,
         if s.denials > 0 { RED } else { "" },
-        s.denials
+        s.denials,
+        if s.ungated > 0 { RED } else { "" },
+        s.ungated
     ));
     out.push_str(&format!("{DIM}{}{R}\n", "─".repeat(cols)));
 

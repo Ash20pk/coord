@@ -174,3 +174,26 @@ pub async fn relay_holds_claim(url: &str, repo: &str, path: &str) -> bool {
     }
     false
 }
+
+/// Subscribe to a repo's event stream and count UngatedWrite events as they
+/// arrive. Must be armed before the write it is meant to observe.
+pub fn watch_ungated(url: &str, repo: &str) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let n = std::sync::Arc::new(AtomicUsize::new(0));
+    let (n2, url, repo) = (n.clone(), url.to_string(), repo.to_string());
+    tokio::spawn(async move {
+        let Ok((mut ws, _)) = connect_async(&url).await else { return };
+        let hello = ClientMsg::Hello { repo, daemon: "probe".into() };
+        if ws.send(WsMsg::Text(serde_json::to_string(&hello).unwrap())).await.is_err() {
+            return;
+        }
+        while let Some(Ok(WsMsg::Text(t))) = ws.next().await {
+            if let Ok(ServerMsg::Event { event: Event::UngatedWrite { .. }, .. }) =
+                serde_json::from_str(&t)
+            {
+                n2.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
+    n
+}

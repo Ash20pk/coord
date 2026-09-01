@@ -11,6 +11,9 @@ pub fn now_ms() -> Ts {
 }
 
 pub const LEASE_MS: u64 = 10 * 60 * 1000; // 10 min, renewed on activity
+/// A session with no activity for this long is treated as gone. Presence is
+/// only useful if it decays: otherwise agents reason about peers that left.
+pub const SESSION_STALE_MS: u64 = 20 * 60 * 1000;
 
 /// Everything that happens is an event on the per-repo sequenced log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +23,17 @@ pub enum Event {
     IntentDeclared { session: String, text: String, ts: Ts },
     ClaimAcquired { session: String, user: String, path: String, lease_until: Ts, intent: String },
     ClaimReleased { session: String, path: String, ts: Ts },
+    /// A write that landed on someone else's claim without being stopped —
+    /// detected after the fact by diffing the working tree. Distinct from
+    /// ClaimDenied: nothing was prevented, only observed.
+    UngatedWrite {
+        session: String,
+        user: String,
+        path: String,
+        holder: String,
+        holder_user: String,
+        ts: Ts,
+    },
     /// A blocked edit attempt. Carries no state change, but it is the signal
     /// that matters: it makes collisions visible and measurable.
     ClaimDenied {
@@ -89,12 +103,36 @@ pub fn paths_overlap(a: &str, b: &str) -> bool {
 pub struct View {
     pub claims: Vec<Claim>,
     pub sessions: HashMap<String, SessionInfo>,
+    /// Who last wrote each path, and when. The working-tree audit is blind to
+    /// authorship — the tree is shared — so it consults this instead of
+    /// assuming every change inside its window was its own.
+    pub last_write: HashMap<String, (String, Ts)>,
 }
 
 impl View {
     pub fn prune(&mut self) {
         let now = now_ms();
         self.claims.retain(|c| c.lease_until > now);
+        // Drop sessions that have gone quiet, and anything they still held.
+        // A crashed session never sends SessionEnded, so without this its
+        // presence lingers forever and peers plan around a ghost.
+        let stale: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| now.saturating_sub(s.last_seen) > SESSION_STALE_MS)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in stale {
+            self.sessions.remove(&k);
+            self.claims.retain(|c| c.session != k);
+        }
+    }
+
+    /// True if a session other than `session` wrote `path` at or after `since`.
+    pub fn written_by_other_since(&self, session: &str, path: &str, since: Ts) -> bool {
+        self.last_write
+            .get(path)
+            .is_some_and(|(who, ts)| who != session && *ts + 250 >= since)
     }
 
     /// First live claim held by a *different* session that overlaps `path`.
@@ -126,6 +164,9 @@ impl View {
                 }
             }
             Event::ClaimAcquired { session, user, path, lease_until, intent } => {
+                if let Some(s) = self.sessions.get_mut(session) {
+                    s.last_seen = now_ms();
+                }
                 // Renew if this session already holds it, else insert.
                 if let Some(c) = self
                     .claims
@@ -147,6 +188,7 @@ impl View {
                 self.claims.retain(|c| !(c.session == *session && c.path == *path));
             }
             Event::FileWritten { session, path, ts } => {
+                self.last_write.insert(path.clone(), (session.clone(), *ts));
                 // Writing renews the covering lease.
                 for c in self.claims.iter_mut() {
                     if c.session == *session && paths_overlap(&c.path, path) {
@@ -158,6 +200,7 @@ impl View {
                 }
             }
             Event::ClaimDenied { .. } => {} // observability only
+            Event::UngatedWrite { .. } => {} // observability only
             Event::SessionEnded { session, .. } => {
                 self.claims.retain(|c| c.session != *session);
                 self.sessions.remove(session);
@@ -176,6 +219,10 @@ pub enum DReq {
     SessionStart { repo_root: String, session: String, user: String, branch: String },
     Intent { repo_root: String, session: String, text: String },
     SessionEnd { repo_root: String, session: String },
+    /// A Bash command about to run: parse it for write targets and gate them.
+    BashPre { repo_root: String, session: String, command: String },
+    /// A Bash command that finished: diff the working tree if it was audited.
+    BashPost { repo_root: String, session: String },
     Who { repo_root: String },
 }
 
@@ -378,19 +425,53 @@ mod tests {
         assert_eq!(v.claims[0].session, "s2");
     }
 
+    #[test]
+    fn quiet_sessions_are_pruned_with_their_claims() {
+        let mut v = View::default();
+        let stale_ts = now_ms() - SESSION_STALE_MS - 1;
+        v.sessions.insert(
+            "ghost".into(),
+            SessionInfo {
+                session: "ghost".into(),
+                user: "crashed".into(),
+                branch: "main".into(),
+                intent: "died".into(),
+                last_seen: stale_ts,
+            },
+        );
+        v.claims.push(claim("ghost", "src/auth.ts", now_ms() + LEASE_MS));
+        v.prune();
+        assert!(v.sessions.is_empty(), "a session gone quiet must stop showing as present");
+        assert!(v.claims.is_empty(), "and must not keep holding files");
+    }
+
+    #[test]
+    fn active_sessions_survive_pruning() {
+        let mut v = View::default();
+        v.apply(&Event::SessionStarted {
+            session: "live".into(),
+            user: "ash".into(),
+            branch: "main".into(),
+            ts: now_ms(),
+        });
+        v.prune();
+        assert_eq!(v.sessions.len(), 1);
+    }
+
     /// Replaying the same log in order must always yield the same view.
     #[test]
     fn log_replay_is_deterministic() {
+        let t0 = now_ms(); // must be recent: stale sessions are pruned
         let log = vec![
-            Event::SessionStarted { session: "s1".into(), user: "a".into(), branch: "m".into(), ts: 1 },
-            Event::IntentDeclared { session: "s1".into(), text: "auth".into(), ts: 2 },
+            Event::SessionStarted { session: "s1".into(), user: "a".into(), branch: "m".into(), ts: t0 },
+            Event::IntentDeclared { session: "s1".into(), text: "auth".into(), ts: t0 + 1 },
             Event::ClaimAcquired {
                 session: "s1".into(), user: "a".into(), path: "src/auth.ts".into(),
                 lease_until: now_ms() + LEASE_MS, intent: "auth".into(),
             },
-            Event::SessionStarted { session: "s2".into(), user: "b".into(), branch: "m".into(), ts: 3 },
+            Event::SessionStarted { session: "s2".into(), user: "b".into(), branch: "m".into(), ts: t0 + 2 },
             Event::FileWritten { session: "s1".into(), path: "src/auth.ts".into(), ts: now_ms() },
-            Event::ClaimReleased { session: "s1".into(), path: "src/auth.ts".into(), ts: 4 },
+            Event::ClaimReleased { session: "s1".into(), path: "src/auth.ts".into(), ts: t0 + 3 },
         ];
         let build = || {
             let mut v = View::default();

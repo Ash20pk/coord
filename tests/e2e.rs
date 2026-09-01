@@ -170,13 +170,10 @@ async fn read_only_tools_are_never_gated() {
     }
 }
 
-/// KNOWN GAP, kept red on purpose. A Bash command that writes a claimed file
-/// is not gated, so any session preferring `sed`/heredocs over the Edit tool
-/// (Claude Code's auto mode does) walks straight past coord. Observed live in
-/// the lab: a session wrote src/auth.js via Bash with zero recorded events.
-/// Un-ignore when Bash write detection lands.
+/// Was a known gap: agents reach for sed/heredocs as readily as the Edit tool,
+/// and auto mode prefers Bash outright. Closed by parsing write targets out of
+/// the command at PreToolUse.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "known gap: Bash writes bypass claims (auto mode uses Bash for edits)"]
 async fn bash_write_to_a_claimed_file_is_blocked() {
     let (sock, root) = scenario("bashgap").await;
     hook(&sock, edit(&root, "sessA", "src/auth.ts", "PreToolUse")); // A claims it
@@ -186,7 +183,12 @@ async fn bash_write_to_a_claimed_file_is_blocked() {
         format!("sed -i '' 's/a/b/' {target}"),
         format!("echo x >> {target}"),
         format!("cat > {target} <<'EOF'\nhi\nEOF"),
-        format!("tee {target} < /dev/null"),
+        format!("echo x | tee {target}"),
+        format!("cp /tmp/whatever {target}"),
+        format!("rm {target}"),
+        // relative path, and a path with .. in it, must resolve the same
+        "sed -i '' 's/a/b/' src/auth.ts".to_string(),
+        "echo x > src/../src/auth.ts".to_string(),
     ] {
         let out = hook(&sock, json!({
             "hook_event_name": "PreToolUse", "session_id": "sessB",
@@ -390,4 +392,215 @@ async fn coord_user_labels_distinct_sessions_on_one_machine() {
     let reason = out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
     assert!(reason.contains("ash"), "brief must name the holder's label: {reason}");
     assert!(!reason.contains("testuser"), "COORD_USER must win over $USER: {reason}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_only_bash_is_never_blocked_and_claims_nothing() {
+    let (sock, root, url) = scenario_with_relay("bashread").await;
+    hook(&sock, edit(&root, "sessA", "src/auth.ts", "PreToolUse")); // A holds it
+
+    for cmd in [
+        "cat src/auth.ts",
+        "grep -n token src/auth.ts",
+        "ls -la src",
+        "git status --porcelain",
+        "sed 's/a/b/' src/auth.ts",
+        "echo 'writing > src/auth.ts is what I would do'",
+        "cat src/auth.ts > /dev/null",
+    ] {
+        let out = hook(&sock, json!({
+            "hook_event_name": "PreToolUse", "session_id": "sessB",
+            "cwd": root.to_string_lossy(), "tool_name": "Bash",
+            "tool_input": { "command": cmd }
+        }));
+        assert!(out.is_none(), "read-only command must not be blocked: {cmd} -> {out:?}");
+    }
+    // And none of them should have taken a claim for sessB.
+    assert!(
+        relay_holds_claim(&url, "e2e-bashread", "src/auth.ts").await,
+        "sessA's claim should be the only one"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bash_write_outside_any_claim_is_allowed_and_then_claimed() {
+    let (sock, root, url) = scenario_with_relay("bashclaim").await;
+    let target = format!("{}/src/fresh.ts", root.to_string_lossy());
+    let out = hook(&sock, json!({
+        "hook_event_name": "PreToolUse", "session_id": "sessA",
+        "cwd": root.to_string_lossy(), "tool_name": "Bash",
+        "tool_input": { "command": format!("echo hi > {target}") }
+    }));
+    assert!(out.is_none(), "an unclaimed path must be writable");
+    assert!(
+        relay_holds_claim(&url, "e2e-bashclaim", "src/fresh.ts").await,
+        "a shell write must take the claim, so peers are blocked next"
+    );
+    // A peer must now be blocked on that same path.
+    let peer = hook(&sock, json!({
+        "hook_event_name": "PreToolUse", "session_id": "sessB",
+        "cwd": root.to_string_lossy(), "tool_name": "Bash",
+        "tool_input": { "command": format!("echo bye >> {target}") }
+    }));
+    assert!(peer.is_some(), "peer must be blocked from the newly claimed path");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unpredictable_bash_write_is_detected_after_the_fact() {
+    // Interpreters can write anything, so the parser cannot gate them. The
+    // working-tree diff must at least record what happened.
+    let (sock, root, url) = scenario_with_relay("audit").await;
+    std::process::Command::new("git").args(["-C", &root.to_string_lossy(), "init", "-q"])
+        .status().unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/auth.ts"), "original\n").unwrap();
+    std::process::Command::new("git").args(["-C", &root.to_string_lossy(), "add", "-A"])
+        .status().unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &root.to_string_lossy(), "-c", "user.email=t@t", "-c", "user.name=t",
+               "commit", "-qm", "seed"])
+        .status().unwrap();
+
+    let ungated = watch_ungated(&url, "e2e-audit");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // sessA claims the file through the normal path.
+    hook(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "sessA", "cwd": root.to_string_lossy()
+    }));
+    hook(&sock, edit(&root, "sessA", "src/auth.ts", "PreToolUse"));
+    assert!(relay_holds_claim(&url, "e2e-audit", "src/auth.ts").await);
+
+    // sessB writes it via an interpreter the parser cannot read.
+    let script = format!(
+        "python3 -c \"open('{}/src/auth.ts','w').write('clobbered')\"",
+        root.to_string_lossy()
+    );
+    hook(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "sessB", "cwd": root.to_string_lossy()
+    }));
+    let pre = hook(&sock, json!({
+        "hook_event_name": "PreToolUse", "session_id": "sessB",
+        "cwd": root.to_string_lossy(), "tool_name": "Bash",
+        "tool_input": { "command": script.clone() }
+    }));
+    assert!(pre.is_none(), "the parser cannot gate an interpreter, so it must allow");
+
+    std::process::Command::new("bash").args(["-lc", &script]).status().unwrap();
+
+    hook(&sock, json!({
+        "hook_event_name": "PostToolUse", "session_id": "sessB",
+        "cwd": root.to_string_lossy(), "tool_name": "Bash",
+        "tool_input": { "command": script }
+    }));
+
+    // The collision must appear in the log as ungated — observed, not prevented.
+    let mut found = false;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if ungated.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "an ungated write over a peer's claim must be recorded");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn presence_is_refreshed_on_every_prompt_not_just_at_startup() {
+    let (sock, root) = scenario("refresh").await;
+
+    // sessB starts alone: no peers to report.
+    hook(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "sessB", "cwd": root.to_string_lossy()
+    }));
+
+    // sessA appears afterwards and takes a file.
+    hook(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "sessA", "cwd": root.to_string_lossy()
+    }));
+    hook(&sock, json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": "sessA",
+        "cwd": root.to_string_lossy(), "prompt": "refactor the auth module"
+    }));
+    hook(&sock, edit(&root, "sessA", "src/auth.ts", "PreToolUse"));
+
+    // sessB's next prompt must learn about sessA — it started before sessA did,
+    // so SessionStart context alone would leave it permanently blind.
+    let out = hook(&sock, json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": "sessB",
+        "cwd": root.to_string_lossy(), "prompt": "now add refreshSession"
+    }))
+    .expect("a prompt with peers active must carry their context");
+
+    let hso = &out["hookSpecificOutput"];
+    assert_eq!(hso["hookEventName"], "UserPromptSubmit");
+    let ctx = hso["additionalContext"].as_str().unwrap();
+    assert!(ctx.contains("refactor the auth module"), "must carry peer intent: {ctx}");
+    assert!(ctx.contains("src/auth.ts"), "must list what the peer holds: {ctx}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_prompt_with_no_peers_stays_quiet() {
+    let (sock, root) = scenario("quiet").await;
+    hook(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "solo", "cwd": root.to_string_lossy()
+    }));
+    let out = hook(&sock, json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": "solo",
+        "cwd": root.to_string_lossy(), "prompt": "do the thing"
+    }));
+    assert!(out.is_none(), "no peers means no injected context: {out:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peers_concurrent_write_is_not_blamed_on_the_audited_session() {
+    // The working tree is shared, so a peer's edit lands inside our audit
+    // window too. Observed live: ci-bot was reported as writing over sam's
+    // claim on a file it never touched.
+    let (sock, root, url) = scenario_with_relay("blame").await;
+    let rs = root.to_string_lossy().to_string();
+    std::process::Command::new("git").args(["-C", &rs, "init", "-q"]).status().unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/billing.js"), "original\n").unwrap();
+    std::fs::write(root.join("src/api.js"), "original\n").unwrap();
+    std::process::Command::new("git").args(["-C", &rs, "add", "-A"]).status().unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &rs, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "seed"])
+        .status().unwrap();
+
+    for s in ["sam", "cibot"] {
+        hook(&sock, json!({
+            "hook_event_name": "SessionStart", "session_id": s, "cwd": rs
+        }));
+    }
+    // sam claims billing.js through the Edit path.
+    hook(&sock, edit(&root, "sam", "src/billing.js", "PreToolUse"));
+    assert!(relay_holds_claim(&url, "e2e-blame", "src/billing.js").await);
+
+    let ungated = watch_ungated(&url, "e2e-blame");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // cibot starts an opaque command (audited) touching only api.js...
+    let script = format!("python3 -c \"open('{rs}/src/api.js','a').write('x')\"");
+    hook(&sock, json!({
+        "hook_event_name": "PreToolUse", "session_id": "cibot",
+        "cwd": rs, "tool_name": "Bash", "tool_input": { "command": script.clone() }
+    }));
+    // ...while sam writes billing.js in the same window, and reports it.
+    std::fs::write(root.join("src/billing.js"), "sam's change\n").unwrap();
+    hook(&sock, edit(&root, "sam", "src/billing.js", "PostToolUse"));
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    std::process::Command::new("bash").args(["-lc", &script]).status().unwrap();
+    hook(&sock, json!({
+        "hook_event_name": "PostToolUse", "session_id": "cibot",
+        "cwd": rs, "tool_name": "Bash", "tool_input": { "command": script }
+    }));
+
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    assert_eq!(
+        ungated.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a peer's own reported write must not be attributed to the audited session"
+    );
 }

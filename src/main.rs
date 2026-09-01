@@ -119,8 +119,8 @@ fn init(relay: String, repo: Option<String>) -> Result<()> {
         .or_insert_with(|| json!({}));
 
     let entries: &[(&str, Option<&str>)] = &[
-        ("PreToolUse", Some("Write|Edit|MultiEdit|NotebookEdit")),
-        ("PostToolUse", Some("Write|Edit|MultiEdit|NotebookEdit")),
+        ("PreToolUse", Some("Write|Edit|MultiEdit|NotebookEdit|Bash")),
+        ("PostToolUse", Some("Write|Edit|MultiEdit|NotebookEdit|Bash")),
         ("SessionStart", None),
         ("UserPromptSubmit", None),
         ("SessionEnd", None),
@@ -132,15 +132,14 @@ fn init(relay: String, repo: Option<String>) -> Result<()> {
             .entry(*event)
             .or_insert_with(|| json!([]));
         let arr = arr.as_array_mut().context("hook entry not an array")?;
-        let already = arr.iter().any(|g| {
-            g["hooks"]
+        // Drop any previous coord entry rather than skipping: an older install
+        // has an outdated matcher and would silently keep its narrower scope.
+        arr.retain(|g| {
+            !g["hooks"]
                 .as_array()
-                .map(|hs| hs.iter().any(|h| h["command"].as_str().map_or(false, |c| c.ends_with(" hook"))))
+                .map(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(|c| c.ends_with(" hook"))))
                 .unwrap_or(false)
         });
-        if already {
-            continue;
-        }
         let mut group = json!({ "hooks": [{ "type": "command", "command": hook_cmd }] });
         if let Some(m) = matcher {
             group["matcher"] = json!(m);

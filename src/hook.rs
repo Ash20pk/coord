@@ -28,7 +28,21 @@ fn inner() {
     let Some(root) = config::find_repo_root(std::path::Path::new(&cwd)) else { return };
     let repo_root = root.to_string_lossy().to_string();
 
+    let tool = v["tool_name"].as_str().unwrap_or("");
     let req = match event {
+        "PreToolUse" | "PostToolUse" if tool == "Bash" => {
+            // Shell writes must be gated too, or the whole scheme is optional:
+            // agents reach for sed/heredocs as readily as the Edit tool.
+            if event == "PreToolUse" {
+                let command = v["tool_input"]["command"].as_str().unwrap_or("").to_string();
+                if command.is_empty() {
+                    return;
+                }
+                DReq::BashPre { repo_root, session, command }
+            } else {
+                DReq::BashPost { repo_root, session }
+            }
+        }
         "PreToolUse" | "PostToolUse" => {
             let Some(path) = file_path_of(&v) else { return };
             if event == "PreToolUse" {
@@ -68,7 +82,8 @@ fn inner() {
             });
             println!("{out}");
         }
-        ("SessionStart", DResp::Peers { sessions, claims }) => {
+        ("SessionStart", DResp::Peers { sessions, claims })
+        | ("UserPromptSubmit", DResp::Peers { sessions, claims }) => {
             if sessions.is_empty() {
                 return;
             }
@@ -93,7 +108,7 @@ fn inner() {
             }
             ctx.push_str("Avoid editing files they are working in; you will be blocked with details if you try.");
             let out = json!({
-                "hookSpecificOutput": { "hookEventName": "SessionStart", "additionalContext": ctx }
+                "hookSpecificOutput": { "hookEventName": event, "additionalContext": ctx }
             });
             println!("{out}");
         }

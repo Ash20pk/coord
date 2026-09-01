@@ -121,20 +121,36 @@ Four layers:
 One test is kept **red on purpose**: `bash_write_to_a_claimed_file_is_blocked`
 (`#[ignore]`d) specifies behaviour v1 does not have. See Known gaps.
 
-## Known gaps (found by running real sessions, not by the suite)
+## Shell writes
 
-- **Bash writes bypass claims.** Only Write/Edit/MultiEdit/NotebookEdit are
-  gated. A session that edits via `sed`, `tee`, or heredocs walks straight past
-  coord — and Claude Code's auto mode prefers Bash for edits. Observed live in
-  the lab: a session modified a claimed file with zero recorded events. In
-  `acceptEdits` mode, where the model uses the Edit tool, gating works.
-- **Presence goes stale.** Peer context is injected once at SessionStart and
-  never refreshed, so a session can reason about peers that left minutes ago.
+Bash is gated too, or the scheme would be optional: agents reach for `sed` and
+heredocs as readily as the Edit tool, and auto mode prefers Bash outright.
+
+`PreToolUse` parses the command for write targets — redirects, heredoc
+targets, `tee`, `sed -i`, `cp`/`mv`, `rm`, `dd of=` — and gates each one.
+Quoting is respected, and heredoc *bodies* are skipped: a body containing
+`(sum, i) => sum + i` would otherwise read `=>` as a redirect.
+
+What the parser cannot read — interpreters, build tools, anything unknown — is
+allowed but *audited*: the working tree is fingerprinted before and after, and
+any change landing on a peer's claim is recorded as `UngatedWrite`. That is
+detection, not prevention, and the dashboard labels it that way.
+
+## Known gaps
+
+- **Attribution under concurrent writes is inferred.** The working tree is
+  shared, so a peer's edit lands inside our audit window too. Authorship comes
+  from their `FileWritten` event; if that has not arrived yet, an ungated write
+  can be attributed to the wrong session. Observed live before the fix.
+- **Interpreters are only detected, never blocked.** `python3 -c "open(...)"`
+  writes first and is recorded second.
 - **Fail-open is ambiguous by design.** An allowed edit and an unreachable
   daemon look identical from the agent's side. Tests use a positive control
   (the relay must hold the claim) to tell them apart; humans should check
   `coord watch` shows a green dot.
 
 Not testable by the suite at all: whether the conflict brief persuades a model
-to re-plan. One live run says yes (session prepared its patch and waited, no
-bypass attempt); N=1.
+to re-plan. Live runs say yes so far — one session prepared its patch and
+waited rather than writing; another, seeing a peer mid-rename, wrote its
+function and flagged that the peer's rename would need to cover it. Neither
+attempted a shell bypass. Small N.

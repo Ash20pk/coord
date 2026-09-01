@@ -31,9 +31,22 @@ struct RepoConn {
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<ServerMsg>>>>,
 }
 
+/// What a session's in-flight Bash command is expected to touch.
+struct PendingBash {
+    /// Working-tree fingerprint, present only when the command needed auditing.
+    snapshot: Option<String>,
+    taken_at: Ts,
+    /// Repo-relative paths the parser predicted.
+    targets: Vec<String>,
+}
+
 #[derive(Default)]
 struct Daemon {
     repos: Mutex<HashMap<String, Arc<RepoConn>>>,
+    /// Working-tree snapshots taken before an audited Bash command, keyed by
+    /// (repo_root, session). Compared afterwards to catch writes the parser
+    /// could not predict.
+    snapshots: Mutex<HashMap<(String, String), PendingBash>>,
 }
 
 pub async fn run() -> Result<()> {
@@ -166,18 +179,135 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             }
         }
         DReq::Intent { repo_root, session, text } => {
-            if let Some(rc) = ensure_repo(d, &repo_root).await {
-                let ev = Event::IntentDeclared { session, text, ts: now_ms() };
-                rc.view.lock().unwrap().apply(&ev);
-                let _ = rc.tx.send(ClientMsg::Append { event: ev });
+            let Some(rc) = ensure_repo(d, &repo_root).await else { return DResp::Ok };
+            let ev = Event::IntentDeclared { session: session.clone(), text, ts: now_ms() };
+            rc.view.lock().unwrap().apply(&ev);
+            let _ = rc.tx.send(ClientMsg::Append { event: ev });
+            // Answer with current peers: presence injected once at SessionStart
+            // goes stale within minutes.
+            let mut v = rc.view.lock().unwrap();
+            v.prune();
+            DResp::Peers {
+                sessions: v.sessions.values().filter(|s| s.session != session).cloned().collect(),
+                claims: v.claims.iter().filter(|c| c.session != session).cloned().collect(),
             }
-            DResp::Ok
         }
         DReq::SessionEnd { repo_root, session } => {
             if let Some(rc) = ensure_repo(d, &repo_root).await {
                 let ev = Event::SessionEnded { session: session.clone(), ts: now_ms() };
                 rc.view.lock().unwrap().apply(&ev);
                 let _ = rc.tx.send(ClientMsg::ReleaseSession { session });
+            }
+            DResp::Ok
+        }
+        DReq::BashPre { repo_root, session, command } => {
+            let Some(rc) = ensure_repo(d, &repo_root).await else {
+                return DResp::Decision { allow: true, reason: None };
+            };
+            let a = crate::bashparse::analyze(&command);
+
+            // Gate every path the command is expected to write.
+            for raw in &a.targets {
+                let path = normalize(&repo_root, raw);
+                if path.is_empty() {
+                    continue; // outside the repo
+                }
+                let hit = {
+                    let v = rc.view.lock().unwrap();
+                    v.conflicting(&session, &path).cloned()
+                };
+                if let Some(c) = hit {
+                    report_denied(&rc, &session, &path, &c);
+                    return deny_bash(&path, &c, raw);
+                }
+            }
+            // Claim them, so peers are blocked while this command runs.
+            for raw in &a.targets {
+                let path = normalize(&repo_root, raw);
+                if path.is_empty() {
+                    continue;
+                }
+                claim_locally(&rc, &session, &path);
+            }
+
+            // Could not prove read-only: snapshot now, diff in BashPost.
+            let snapshot = if a.audit { worktree_snapshot(&repo_root).await } else { None };
+            let targets: Vec<String> = a
+                .targets
+                .iter()
+                .map(|raw| normalize(&repo_root, raw))
+                .filter(|p| !p.is_empty())
+                .collect();
+            if snapshot.is_some() || !targets.is_empty() {
+                d.snapshots.lock().unwrap().insert(
+                    (repo_root.clone(), session.clone()),
+                    PendingBash { snapshot, taken_at: now_ms(), targets },
+                );
+            }
+            DResp::Decision { allow: true, reason: None }
+        }
+        DReq::BashPost { repo_root, session } => {
+            let pending = d.snapshots.lock().unwrap().remove(&(repo_root.clone(), session.clone()));
+            let Some(pending) = pending else { return DResp::Ok };
+            let Some(rc) = ensure_repo(d, &repo_root).await else { return DResp::Ok };
+            let taken_at = pending.taken_at;
+
+            // Shell writes we predicted are still writes: record authorship, or
+            // the log cannot tell a peer's edit from an unattributed one.
+            for path in &pending.targets {
+                let ev = Event::FileWritten {
+                    session: session.clone(),
+                    path: path.clone(),
+                    ts: now_ms(),
+                };
+                rc.view.lock().unwrap().apply(&ev);
+                let _ = rc.tx.send(ClientMsg::Append { event: ev });
+            }
+
+            let Some(before) = pending.snapshot else { return DResp::Ok };
+            let Some(after) = worktree_snapshot(&repo_root).await else { return DResp::Ok };
+
+            for path in changed_paths(&before, &after) {
+                if pending.targets.contains(&path) {
+                    continue; // already accounted for above
+                }
+                let held = {
+                    let v = rc.view.lock().unwrap();
+                    // The tree is shared: a peer editing concurrently shows up
+                    // in our window too. Their own write event is the proof it
+                    // was not us, so do not report it as our collision.
+                    if v.written_by_other_since(&session, &path, taken_at) {
+                        continue;
+                    }
+                    v.conflicting(&session, &path).cloned()
+                };
+                match held {
+                    // A write landed on someone else's file. It cannot be
+                    // undone, only recorded — honestly, as ungated.
+                    Some(c) => {
+                        let user = user_of(&rc, &session);
+                        let _ = rc.tx.send(ClientMsg::Append {
+                            event: Event::UngatedWrite {
+                                session: session.clone(),
+                                user,
+                                path: path.clone(),
+                                holder: c.session.clone(),
+                                holder_user: c.user.clone(),
+                                ts: now_ms(),
+                            },
+                        });
+                    }
+                    None => {
+                        claim_locally(&rc, &session, &path);
+                        let ev = Event::FileWritten {
+                            session: session.clone(),
+                            path: path.clone(),
+                            ts: now_ms(),
+                        };
+                        rc.view.lock().unwrap().apply(&ev);
+                        let _ = rc.tx.send(ClientMsg::Append { event: ev });
+                    }
+                }
             }
             DResp::Ok
         }
@@ -193,6 +323,126 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                 claims: v.claims.clone(),
             }
         }
+    }
+}
+
+/// Record a denial so collisions caught by the local mirror still reach the log.
+fn report_denied(rc: &Arc<RepoConn>, session: &str, path: &str, c: &Claim) {
+    let user = user_of(rc, session);
+    let _ = rc.tx.send(ClientMsg::Append {
+        event: Event::ClaimDenied {
+            session: session.to_string(),
+            user,
+            path: path.to_string(),
+            holder: c.session.clone(),
+            holder_user: c.user.clone(),
+            ts: now_ms(),
+        },
+    });
+}
+
+fn user_of(rc: &Arc<RepoConn>, session: &str) -> String {
+    rc.view
+        .lock()
+        .unwrap()
+        .sessions
+        .get(session)
+        .map(|s| s.user.clone())
+        .unwrap_or_else(whoami)
+}
+
+/// Optimistically claim locally and tell the relay. Used where we have already
+/// decided to allow the write, so a synchronous round-trip buys nothing.
+fn claim_locally(rc: &Arc<RepoConn>, session: &str, path: &str) {
+    let (intent, user) = {
+        let v = rc.view.lock().unwrap();
+        match v.sessions.get(session) {
+            Some(s) => (s.intent.clone(), s.user.clone()),
+            None => (String::new(), whoami()),
+        }
+    };
+    let ev = Event::ClaimAcquired {
+        session: session.to_string(),
+        user,
+        path: path.to_string(),
+        lease_until: now_ms() + LEASE_MS,
+        intent,
+    };
+    rc.view.lock().unwrap().apply(&ev);
+    let _ = rc.tx.send(ClientMsg::Append { event: ev });
+}
+
+/// Repo-relative path for a target as written on a command line. Empty string
+/// when it falls outside the repo (those are none of our business).
+fn normalize(repo_root: &str, raw: &str) -> String {
+    let root = std::path::Path::new(repo_root.trim_end_matches('/'));
+    let p = std::path::Path::new(raw);
+    let joined = if p.is_absolute() { p.to_path_buf() } else { root.join(p) };
+    // Resolve . and .. without touching the filesystem (the file may not exist).
+    let mut parts: Vec<String> = Vec::new();
+    for c in joined.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => parts.push(other.as_os_str().to_string_lossy().to_string()),
+        }
+    }
+    let abs = parts.join("/").replace("//", "/");
+    let root_s = root.to_string_lossy().to_string();
+    match abs.strip_prefix(&format!("{root_s}/")) {
+        Some(rel) => rel.to_string(),
+        None => String::new(),
+    }
+}
+
+/// `git status` of the working tree, used as a cheap change fingerprint.
+async fn worktree_snapshot(repo_root: &str) -> Option<String> {
+    let root = repo_root.to_string();
+    tokio::task::spawn_blocking(move || {
+        let out = std::process::Command::new("git")
+            .args(["-C", &root, "status", "--porcelain", "--untracked-files=all"])
+            .output()
+            .ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Paths whose status differs between two snapshots.
+fn changed_paths(before: &str, after: &str) -> Vec<String> {
+    use std::collections::HashSet;
+    let lines = |s: &str| -> HashSet<String> { s.lines().map(str::to_string).collect() };
+    let (b, a) = (lines(before), lines(after));
+    let mut out: Vec<String> = a
+        .symmetric_difference(&b)
+        .filter_map(|l| {
+            let rest = l.get(3..)?.trim();
+            // Renames appear as "old -> new"; the new path is what was written.
+            let p = rest.rsplit(" -> ").next().unwrap_or(rest);
+            Some(p.trim_matches('"').to_string())
+        })
+        .filter(|p| !p.is_empty() && !p.starts_with(".coord") && !p.starts_with(".claude"))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn deny_bash(path: &str, c: &Claim, raw: &str) -> DResp {
+    let base = match deny(path, c) {
+        DResp::Decision { reason: Some(r), .. } => r,
+        other => return other,
+    };
+    DResp::Decision {
+        allow: false,
+        reason: Some(format!(
+            "{base} This Bash command would write `{raw}`. Editing it by shell does not bypass the \
+             claim."
+        )),
     }
 }
 
