@@ -40,7 +40,7 @@ fn inner() {
         "SessionStart" => DReq::SessionStart {
             repo_root,
             session,
-            user: std::env::var("USER").unwrap_or_else(|_| "unknown".into()),
+            user: session_user(),
             branch: git_branch(&cwd),
         },
         "UserPromptSubmit" => {
@@ -111,6 +111,17 @@ fn file_path_of(v: &Value) -> Option<String> {
         .as_str()
         .or_else(|| ti["notebook_path"].as_str())
         .map(str::to_string)
+}
+
+/// Who this session belongs to. COORD_USER lets several sessions on one
+/// machine carry distinct identities (useful for testing, demos, and shared
+/// boxes); otherwise fall back to the OS user.
+fn session_user() -> String {
+    std::env::var("COORD_USER")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("USER").ok())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 fn git_branch(cwd: &str) -> String {

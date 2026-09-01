@@ -16,10 +16,21 @@ const BIN: &str = env!("CARGO_BIN_EXE_coord");
 
 /// Run `coord hook` with a payload on stdin; returns parsed stdout (None if empty).
 fn hook(sock: &Path, payload: Value) -> Option<Value> {
-    let mut child = Command::new(BIN)
-        .arg("hook")
-        .env("COORD_SOCK", sock)
-        .env("USER", "testuser")
+    hook_as(sock, payload, None)
+}
+
+/// As `hook`, but labelling the session with COORD_USER.
+fn hook_as(sock: &Path, payload: Value, coord_user: Option<&str>) -> Option<Value> {
+    let mut cmd = Command::new(BIN);
+    cmd.arg("hook").env("COORD_SOCK", sock).env("USER", "testuser");
+    if let Some(u) = coord_user {
+        cmd.env("COORD_USER", u);
+    }
+    run(cmd, payload)
+}
+
+fn run(mut cmd: Command, payload: Value) -> Option<Value> {
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -255,4 +266,27 @@ async fn hook_latency_stays_in_the_interactive_budget() {
         "hook latency regressed to {per_call:?} per call"
     );
     eprintln!("hook latency: {per_call:?} per call");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn coord_user_labels_distinct_sessions_on_one_machine() {
+    // Two sessions on the same box (same $USER) must still be able to carry
+    // distinct identities — this is how a single dev tests, demos, or runs
+    // several named agents at once.
+    let (sock, root) = scenario("labels").await;
+
+    hook_as(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "sessA", "cwd": root.to_string_lossy()
+    }), Some("ash"));
+    hook_as(&sock, json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": "sessA",
+        "cwd": root.to_string_lossy(), "prompt": "refactor auth"
+    }), Some("ash"));
+    hook_as(&sock, edit(&root, "sessA", "src/auth.js", "PreToolUse"), Some("ash"));
+
+    let out = hook_as(&sock, edit(&root, "sessB", "src/auth.js", "PreToolUse"), Some("priya"))
+        .expect("collision must be reported");
+    let reason = out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+    assert!(reason.contains("ash"), "brief must name the holder's label: {reason}");
+    assert!(!reason.contains("testuser"), "COORD_USER must win over $USER: {reason}");
 }

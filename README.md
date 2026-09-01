@@ -38,6 +38,31 @@ Restart your Claude Code sessions in that repo. Then:
 coord who      # who's active, what they're doing, what they hold
 ```
 
+## Testing it with two sessions on one machine
+
+You don't need two OS users. Sessions are distinguished by Claude Code's own
+session id; `COORD_USER` just gives them readable names in conflict briefs.
+
+```sh
+# terminal 1
+COORD_USER=ash claude
+
+# terminal 2 (same repo)
+COORD_USER=priya claude
+```
+
+Give both an overlapping task ("refactor the auth module"). The second session
+to touch a file gets denied with the first session's identity and intent, and
+re-plans. Note `$USER` itself must not be overridden — Claude Code resolves its
+credentials through it.
+
+Inspect what happened afterwards:
+
+```sh
+sqlite3 ~/.coord/relay.db \
+  "SELECT seq, datetime(ts/1000,'unixepoch','localtime'), json FROM events ORDER BY seq;"
+```
+
 ## Status
 
 v1 — shared-tree claims mode. Planned: fleet mode (worktree isolation +
