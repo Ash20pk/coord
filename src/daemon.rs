@@ -169,7 +169,8 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
         DReq::PostWrite { repo_root, session, path } => {
             if let Some(rc) = ensure_repo(d, &repo_root).await {
                 let path = rel_path(&repo_root, &path);
-                let ev = Event::FileWritten { session, path, ts: now_ms() };
+                let user = user_of(&rc, &session);
+                let ev = Event::FileWritten { session, user, path, ts: now_ms() };
                 rc.view.lock().unwrap().apply(&ev);
                 let _ = rc.tx.send(ClientMsg::Append { event: ev });
             }
@@ -265,9 +266,11 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
 
             // Shell writes we predicted are still writes: record authorship, or
             // the log cannot tell a peer's edit from an unattributed one.
+            let user = user_of(&rc, &session);
             for path in &pending.targets {
                 let ev = Event::FileWritten {
                     session: session.clone(),
+                    user: user.clone(),
                     path: path.clone(),
                     ts: now_ms(),
                 };
@@ -300,11 +303,10 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                     // A write landed on someone else's file. It cannot be
                     // undone, only recorded — honestly, as ungated.
                     Some(c) => {
-                        let user = user_of(&rc, &session);
                         let _ = rc.tx.send(ClientMsg::Append {
                             event: Event::UngatedWrite {
                                 session: session.clone(),
-                                user,
+                                user: user.clone(),
                                 path: path.clone(),
                                 holder: c.session.clone(),
                                 holder_user: c.user.clone(),
@@ -316,6 +318,7 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                         claim_locally(&rc, &session, &path);
                         let ev = Event::FileWritten {
                             session: session.clone(),
+                            user: user.clone(),
                             path: path.clone(),
                             ts: now_ms(),
                         };

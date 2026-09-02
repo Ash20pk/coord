@@ -51,7 +51,17 @@ pub enum Event {
         holder_user: String,
         ts: Ts,
     },
-    FileWritten { session: String, path: String, ts: Ts },
+    /// A write we recorded. Carries the user as well as the session: joining
+    /// back through `SessionStarted` to name an author is the fragile path
+    /// that once blamed the wrong session for a peer's concurrent write.
+    /// `default` so events logged before the field existed still replay.
+    FileWritten {
+        session: String,
+        #[serde(default)]
+        user: String,
+        path: String,
+        ts: Ts,
+    },
     SessionEnded { session: String, ts: Ts },
 }
 
@@ -215,7 +225,7 @@ impl View {
             Event::ClaimReleased { session, path, .. } => {
                 self.claims.retain(|c| !(c.session == *session && c.path == *path));
             }
-            Event::FileWritten { session, path, ts } => {
+            Event::FileWritten { session, path, ts, .. } => {
                 self.last_write.insert(path.clone(), (session.clone(), *ts));
                 // Writing renews the covering lease.
                 for c in self.claims.iter_mut() {
@@ -453,7 +463,7 @@ mod tests {
         v.claims.push(claim("s1", "lib/other.ts", soon));  // does not cover
         v.claims.push(claim("s2", "src/auth", soon));       // other session
         let ts = now_ms();
-        v.apply(&Event::FileWritten { session: "s1".into(), path: "src/auth/session.ts".into(), ts });
+        v.apply(&Event::FileWritten { session: "s1".into(), user: "u".into(), path: "src/auth/session.ts".into(), ts });
 
         let get = |s: &str, p: &str| {
             v.claims.iter().find(|c| c.session == s && c.path == p).unwrap().lease_until
@@ -479,6 +489,36 @@ mod tests {
         assert!(v.sessions.is_empty());
         assert_eq!(v.claims.len(), 1);
         assert_eq!(v.claims[0].session, "s2");
+    }
+
+    // ---------- file_written attribution ----------
+
+    /// The event describes itself instead of requiring a join back through
+    /// SessionStarted — the fragile path that once blamed the wrong session.
+    #[test]
+    fn file_written_carries_its_user() {
+        let ev = Event::FileWritten {
+            session: "s1".into(),
+            user: "ash".into(),
+            path: "src/auth.js".into(),
+            ts: now_ms(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains(r#""user":"ash""#), "{json}");
+    }
+
+    /// Rows written before the field existed must still replay.
+    #[test]
+    fn file_written_without_a_user_still_deserializes() {
+        let old = r#"{"type":"file_written","session":"s1","path":"src/auth.js","ts":1}"#;
+        let ev: Event = serde_json::from_str(old).unwrap();
+        match ev {
+            Event::FileWritten { user, session, .. } => {
+                assert_eq!(session, "s1");
+                assert_eq!(user, "", "missing user defaults empty, not a parse failure");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 
     #[test]
@@ -526,7 +566,7 @@ mod tests {
                 lease_until: now_ms() + LEASE_MS, intent: "auth".into(),
             },
             Event::SessionStarted { session: "s2".into(), user: "b".into(), branch: "m".into(), ts: t0 + 2 },
-            Event::FileWritten { session: "s1".into(), path: "src/auth.ts".into(), ts: now_ms() },
+            Event::FileWritten { session: "s1".into(), user: "u".into(), path: "src/auth.ts".into(), ts: now_ms() },
             Event::ClaimReleased { session: "s1".into(), path: "src/auth.ts".into(), ts: t0 + 3 },
         ];
         let build = || {

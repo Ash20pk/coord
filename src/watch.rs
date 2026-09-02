@@ -146,8 +146,14 @@ fn describe(e: &Event) -> Option<String> {
             path,
             holder_user
         ),
-        Event::FileWritten { path, ts, .. } => {
-            format!("{DIM}{}  wrote   {}{R}", clock(*ts), path)
+        // The event names its own author now; older rows have no user, so
+        // they degrade to the anonymous line rather than a wrong name.
+        Event::FileWritten { user, path, ts, .. } => {
+            if user.is_empty() {
+                format!("{DIM}{}  wrote   {}{R}", clock(*ts), path)
+            } else {
+                format!("{DIM}{}{R}  {CYAN}{:<9}{R} {DIM}wrote   {}{R}", clock(*ts), user, path)
+            }
         }
         Event::SessionEnded { ts, .. } => format!("{DIM}{}  session ended{R}", clock(*ts)),
         Event::ClaimReleased { path, ts, .. } => {

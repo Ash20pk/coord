@@ -1,12 +1,12 @@
 # coord — state of the project
 
-_As of 2 September 2026. Nine commits, `2b4dd0e`..`a33719d`._
+_As of 2 September 2026. Ten commits, `2b4dd0e`..`346ab0f`._
 
 Realtime coordination for coding agents. Multiple Claude Code sessions work one
 repo without overwriting each other, and — the part that makes it multiplayer
 rather than just a lock — they tell each other what they are doing.
 
-Roughly 3,400 lines of Rust plus two web pages. 82 tests, all passing, ~2.5s.
+Roughly 3,400 lines of Rust plus two web pages. 84 tests, all passing, ~2.5s.
 
 ---
 
@@ -15,7 +15,7 @@ Roughly 3,400 lines of Rust plus two web pages. 82 tests, all passing, ~2.5s.
 | Capability | Mechanism | Verified |
 |---|---|---|
 | Claims with leases | Per-repo sequenced log, single arbiter | 400+ concurrent races, exactly one winner each |
-| Conflict briefs | `PreToolUse` deny carrying holder + intent | Live: a real session re-planned instead of writing |
+| Conflict briefs | `PreToolUse` deny carrying holder + intent | Live on express: a blocked agent read the holder off the brief and waited |
 | Shell-write gating | Bash command parsed for write targets | `sed -i`, heredocs, `tee`, `cp`, `rm`, redirects |
 | After-the-fact detection | Working-tree diff around opaque commands | Live: `python3 -c` write recorded as ungated |
 | Presence | Peer intents injected every prompt | Live: a session deferred without ever being blocked |
@@ -59,7 +59,7 @@ socket. **4.1 ms end to end**, including process spawn and a relay round-trip.
 
 | Layer | Tests | What it protects |
 |---|---|---|
-| Unit — protocol | 39 | path-overlap boundaries, lease expiry, log-replay determinism, staleness |
+| Unit — protocol | 41 | path-overlap boundaries, lease expiry, log-replay determinism, staleness, write attribution |
 | Unit — bash parser | 20 | quoting, heredoc bodies, arrows, read-only proofs |
 | Arbitration | 9 | 400+ races → one winner; brief contents; repo isolation |
 | Failure injection | 8 | dead/hung relay, dead daemon, malformed input, crash recovery |
@@ -98,6 +98,87 @@ the agents announced ownership up front and respected it, so presence and
 messaging prevented contention *before* any block. Good product outcome; it also
 means the block-and-notify path only gets exercised when overlap is forced. This
 test measures coordination, not contention.
+
+---
+
+## Same goal, cheaper model: four Haiku agents
+
+The three runs above were Opus. The same `GOAL.md` and the same four roles were
+then given to four Haiku sessions, run headless (`claude -p --model haiku`) in
+parallel against the live relay.
+
+**The substrate held; the coordination did not.**
+
+| | Opus runs | Haiku run |
+|---|---|---|
+| Result | 65/65 tests | 9/9 (ci-bot's own suite) |
+| Messages between agents | 16–28 | **0** |
+| Claims / writes | — | 18 / 18 |
+| Denials, ungated writes | 0 | 0 |
+| Attribution | correct | correct |
+
+Claims were attributed correctly again — `ash → src/auth.js`, `priya →
+src/billing.js`, `sam → src/api.js`, `ci-bot → src/types.js` + `test.js` — and
+the endpoint works. Every mechanical claim about coord survived the model swap.
+
+What did not survive is the behaviour the mechanism exists to reward. No agent
+ran `coord who`. No agent sent a message, though `coord msg` was in every prompt.
+Each stayed inside its own file and stopped. Zero collisions for the third time,
+but for the opposite reason: Opus avoided them by negotiating ownership, Haiku
+avoided them by never looking outside its lane.
+
+The cost shows up in the sign-offs. `ash` closed with *"Priya can now add
+`refreshSession()`"* — priya owns billing, not auth; `ci-bot` likewise recorded
+priya as the auth.js owner. Both had the ownership map wrong, and `coord who`
+would have corrected either one. Nothing in the Opus runs — the interface
+negotiation, the percentage-vs-fraction correction, the cross-file rounding bug
+found by the agent that owned neither file — has any analogue here. The 9-vs-65
+test gap is the same fact: ci-bot wrote and graded its own suite with no input
+from anyone.
+
+So presence and messaging are *offered* affordances, and a cheap model does not
+reach for them. If mixed-capability fleets matter, coordination has to be pushed
+at the agent — the way a conflict brief is — rather than left as a command it
+may or may not think to run.
+
+**Reproduced from a clean seed**, scripted this time as `lab/haiku-run.sh`, with
+a prompt that pushed harder than `GOAL.md` does — it told each agent the other
+three were running in parallel and to run `coord who` before writing. Same
+outcome: 16/16 on ci-bot's own suite, correct attribution, **zero messages and
+zero `coord who` invocations** across all four transcripts. Being told to look
+outside your lane is not enough; the mechanism has to arrive unasked.
+
+---
+
+## First real repo: express, and the first recorded collision
+
+Every run above is a seeded toy — four files, one owner each — and every one of
+them produced zero collisions. So coord's central path had never fired. The next
+run used a real codebase: **expressjs/express** at `023767f`, four Haiku agents,
+ordinary maintenance work, and three of the four given business in the *same
+file* so contention was forced rather than left to chance (`lab/dogfood.sh`).
+
+| | Lab goal runs (x4) | express |
+|---|---|---|
+| `claim_denied` | **0** | **1** |
+| `ungated_write` | 0 | 0 |
+| `path_freed` | 0 | 1 |
+| Claims / writes | 14-18 | 4 / 4 |
+| Messages | 0-28 | 0 |
+| Repo suite after | — | 1260/1260 passing |
+
+`priya` was denied `lib/response.js` while `ash` held it, and the brief did the
+work it exists to do — she read the holder and the remaining lease straight off
+it, completed her analysis without writing, and stopped with *"currently locked
+by ash with about 9 minutes remaining... I'll proceed once the file is
+released."* `path_freed` fired when ash finished. The diff is 34 lines across
+`lib/response.js` and `lib/utils.js`, and express's own 1260 tests still pass.
+
+Two honest limits. **N is one**: a single denial is evidence the path works, not
+a measurement of how often it is needed — that still wants a week of ordinary
+work. And priya *waited* rather than being woken and resuming: a headless run
+ends at its turn boundary, so the release notification had nothing left to wake.
+The interactive lab is where that half gets exercised.
 
 ---
 
@@ -165,10 +246,11 @@ spec until it passed.
 
 ## What is worth building next
 
-1. **Dogfood on a real repo and read the numbers.** `claim_denied` is contention
-   prevented, `ungated_write` is contention caught too late. If both stay near
-   zero across a week of ordinary work, that is the real answer about timing —
-   and it should be known before building anything larger.
+1. **Dogfood on a real repo and read the numbers.** Started: the express run
+   above is the first one, and it produced the first denial. `claim_denied` is
+   contention prevented, `ungated_write` is contention caught too late. One
+   collision under forced overlap is not the number that matters — a week of
+   *unforced* work is, and it should be known before building anything larger.
 2. **Fleet mode** — worktree isolation plus an agent-driven merge queue, where a
    rebase conflict fires a conflict brief at the agent instead of failing to a
    human. This is the enterprise half; claims are the pairing half.
@@ -182,15 +264,20 @@ spec until it passed.
 ## Reproducing any of this
 
 ```sh
-cargo test                       # 82 tests, ~2.5s
+cargo test                       # 84 tests, ~2.5s
 ./lab/lab.sh reset               # seed the goal repo
 ./lab/lab.sh web                 # four browser terminals + live log
 ./lab/lab.sh start               # or the four-pane tmux rig
+./lab/haiku-run.sh reset         # the four-Haiku run, headless, from a clean seed
+./lab/dogfood.sh                 # clone express and run four agents over it
 ```
 
 Give each agent its role from `GOAL.md`, then watch. Afterwards:
 
 ```sh
-sqlite3 ~/.coord/relay.db \
-  "SELECT json_extract(json,'\$.type'), count(*) FROM events GROUP BY 1 ORDER BY 2 DESC;"
+source lab/metrics.sh && coord_metrics ~/.coord/relay.db   # or: ./lab/dogfood.sh report
 ```
+
+`coord_metrics` holds the one copy of these queries: event counts, claims by
+user, both collision tables, and every message. Note that `seq` is per-repo, so
+only `ts` orders runs against each other.

@@ -164,6 +164,8 @@ function apply(e, live){
     claims = claims.filter(c => !(c.session === e.session && c.path === e.path));
   } else if (t === 'file_written'){
     stats.writes++; lastWrite.set(e.path, e.session);
+    // e.user is authoritative; pre-`user` rows fall back to the session join.
+    if (e.user) { const s = sessions.get(e.session); if (s && !s.user) s.user = e.user; }
   } else if (t === 'claim_denied'){
     stats.blocked++;
   } else if (t === 'ungated_write'){
