@@ -38,6 +38,9 @@ struct PendingBash {
     taken_at: Ts,
     /// Repo-relative paths the parser predicted.
     targets: Vec<String>,
+    /// The command itself. When a peer is also writing, naming a path is the
+    /// evidence that a change was ours rather than theirs.
+    command: String,
 }
 
 #[derive(Default)]
@@ -241,7 +244,7 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             if snapshot.is_some() || !targets.is_empty() {
                 d.snapshots.lock().unwrap().insert(
                     (repo_root.clone(), session.clone()),
-                    PendingBash { snapshot, taken_at: now_ms(), targets },
+                    PendingBash { snapshot, taken_at: now_ms(), targets, command: command.clone() },
                 );
             }
             DResp::Decision { allow: true, reason: None }
@@ -271,12 +274,16 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                 if pending.targets.contains(&path) {
                     continue; // already accounted for above
                 }
+                // Naming the file is evidence the change was ours. Without
+                // this, a peer writing the same file continuously masks every
+                // one of our writes to it — which is precisely the collision
+                // we exist to catch.
+                let we_named_it = mentions_path(&pending.command, &path);
                 let held = {
                     let v = rc.view.lock().unwrap();
-                    // The tree is shared: a peer editing concurrently shows up
-                    // in our window too. Their own write event is the proof it
-                    // was not us, so do not report it as our collision.
-                    if v.written_by_other_since(&session, &path, taken_at) {
+                    // The tree is shared, so a peer's concurrent edit lands in
+                    // our window too; their own write event says it was theirs.
+                    if !we_named_it && v.written_by_other_since(&session, &path, taken_at) {
                         continue;
                     }
                     v.conflicting(&session, &path).cloned()
@@ -370,6 +377,18 @@ fn claim_locally(rc: &Arc<RepoConn>, session: &str, path: &str) {
     };
     rc.view.lock().unwrap().apply(&ev);
     let _ = rc.tx.send(ClientMsg::Append { event: ev });
+}
+
+/// Does this command name the given repo-relative path, in full or by file
+/// name? Used only to attribute a change we already know happened.
+fn mentions_path(command: &str, path: &str) -> bool {
+    if command.contains(path) {
+        return true;
+    }
+    match path.rsplit('/').next() {
+        Some(base) if base.len() >= 3 => command.contains(base),
+        _ => false,
+    }
 }
 
 /// Repo-relative path for a target as written on a command line. Empty string

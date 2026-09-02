@@ -1,10 +1,10 @@
 use crate::proto::*;
 use anyhow::Result;
 use axum::{
-    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, State},
-    response::IntoResponse,
+    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Query, State},
+    response::{Html, IntoResponse},
     routing::get,
-    Router,
+    Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -48,7 +48,7 @@ impl App {
 pub async fn start(listen: &str, db_path: PathBuf) -> Result<std::net::SocketAddr> {
     let (listener, app) = prepare(listen, db_path).await?;
     let addr = listener.local_addr()?;
-    let router = Router::new().route("/ws", get(ws_handler)).with_state(app);
+    let router = routes(app);
     tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
@@ -73,10 +73,70 @@ async fn prepare(listen: &str, db_path: PathBuf) -> Result<(tokio::net::TcpListe
 
 pub async fn run(listen: String, db_path: PathBuf) -> Result<()> {
     let (listener, app) = prepare(&listen, db_path.clone()).await?;
-    let router = Router::new().route("/ws", get(ws_handler)).with_state(app);
+    let router = routes(app);
+    let shown = listen.replace("0.0.0.0", "127.0.0.1");
     eprintln!("coord relay listening on ws://{listen}/ws (audit log: {})", db_path.display());
+    eprintln!("  dashboard: http://{shown}/");
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+fn routes(app: Arc<App>) -> Router {
+    Router::new()
+        .route("/", get(|| async { Html(include_str!("dashboard.html")) }))
+        .route("/api/repos", get(repos_handler))
+        .route("/api/events", get(events_handler))
+        .route("/ws", get(ws_handler))
+        .with_state(app)
+}
+
+/// Repos this relay has seen, live ones first.
+async fn repos_handler(State(app): State<Arc<App>>) -> impl IntoResponse {
+    let mut live: Vec<String> = app.repos.lock().unwrap().keys().cloned().collect();
+    live.sort();
+    let db = app.db.lock().unwrap();
+    if let Ok(mut q) = db.prepare("SELECT DISTINCT repo FROM events") {
+        if let Ok(rows) = q.query_map([], |r| r.get::<_, String>(0)) {
+            for repo in rows.flatten() {
+                if !live.contains(&repo) {
+                    live.push(repo);
+                }
+            }
+        }
+    }
+    Json(live)
+}
+
+#[derive(serde::Deserialize)]
+struct EventsQuery {
+    repo: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// Recent history, so the page is useful the moment it is opened rather than
+/// only from the connection onwards.
+async fn events_handler(
+    State(app): State<Arc<App>>,
+    Query(q): Query<EventsQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(400).min(2000);
+    let db = app.db.lock().unwrap();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    if let Ok(mut stmt) = db.prepare(
+        "SELECT json FROM (SELECT seq, json FROM events WHERE repo = ?1 \
+         ORDER BY seq DESC LIMIT ?2) ORDER BY seq ASC",
+    ) {
+        if let Ok(rows) = stmt.query_map(rusqlite::params![q.repo, limit], |r| r.get::<_, String>(0))
+        {
+            for j in rows.flatten() {
+                if let Ok(v) = serde_json::from_str(&j) {
+                    out.push(v);
+                }
+            }
+        }
+    }
+    Json(out)
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(app): State<Arc<App>>) -> impl IntoResponse {

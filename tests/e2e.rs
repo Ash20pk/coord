@@ -604,3 +604,53 @@ async fn a_peers_concurrent_write_is_not_blamed_on_the_audited_session() {
         "a peer's own reported write must not be attributed to the audited session"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ungated_write_is_still_caught_while_the_holder_writes_continuously() {
+    // Observed live and missed entirely: the holder was editing the file every
+    // few seconds, so "a peer wrote this in my window" was always true and the
+    // audit skipped every one of the intruder's writes. Naming the file in the
+    // command is what distinguishes our write from theirs.
+    let (sock, root, url) = scenario_with_relay("masked").await;
+    let rs = root.to_string_lossy().to_string();
+    std::process::Command::new("git").args(["-C", &rs, "init", "-q"]).status().unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/auth.js"), "original\n").unwrap();
+    std::process::Command::new("git").args(["-C", &rs, "add", "-A"]).status().unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &rs, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "seed"])
+        .status().unwrap();
+
+    for s in ["holder", "intruder"] {
+        hook(&sock, json!({ "hook_event_name": "SessionStart", "session_id": s, "cwd": rs }));
+    }
+    hook(&sock, edit(&root, "holder", "src/auth.js", "PreToolUse"));
+
+    let ungated = watch_ungated(&url, "e2e-masked");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // The intruder runs an opaque command naming the file...
+    let script = format!("python3 -c \"open('{rs}/src/auth.js','a').write('intruder\\n')\"");
+    hook(&sock, json!({
+        "hook_event_name": "PreToolUse", "session_id": "intruder",
+        "cwd": rs, "tool_name": "Bash", "tool_input": { "command": script.clone() }
+    }));
+    // ...while the holder keeps writing the very same file throughout.
+    std::fs::write(root.join("src/auth.js"), "holder edit 1\n").unwrap();
+    hook(&sock, edit(&root, "holder", "src/auth.js", "PostToolUse"));
+    std::process::Command::new("bash").args(["-lc", &script]).status().unwrap();
+    std::fs::write(root.join("src/auth.js"), "holder edit 2\n").unwrap();
+    hook(&sock, edit(&root, "holder", "src/auth.js", "PostToolUse"));
+
+    hook(&sock, json!({
+        "hook_event_name": "PostToolUse", "session_id": "intruder",
+        "cwd": rs, "tool_name": "Bash", "tool_input": { "command": script }
+    }));
+
+    let mut found = false;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if ungated.load(std::sync::atomic::Ordering::SeqCst) > 0 { found = true; break; }
+    }
+    assert!(found, "a busy holder must not mask an intruder's ungated write");
+}

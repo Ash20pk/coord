@@ -1,0 +1,238 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>coord — live</title>
+<style>
+  :root{
+    --bg:#0b0d10; --panel:#12161b; --line:#1e242c; --ink:#e6edf3; --dim:#7d8896;
+    --green:#3fb950; --red:#f85149; --amber:#d29922; --cyan:#58a6ff; --violet:#a371f7;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.5 var(--mono);
+       -webkit-font-smoothing:antialiased}
+  header{display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+         padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel);
+         position:sticky;top:0;z-index:5}
+  .brand{font-weight:700;letter-spacing:.5px;font-size:15px}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:7px;
+       background:var(--red);transition:background .3s}
+  .dot.on{background:var(--green);box-shadow:0 0 8px var(--green)}
+  select{background:#0d1117;color:var(--ink);border:1px solid var(--line);
+         border-radius:6px;padding:4px 8px;font:12px var(--mono)}
+  .stats{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
+  .stat{background:#0d1117;border:1px solid var(--line);border-radius:8px;
+        padding:6px 12px;min-width:78px}
+  .stat b{display:block;font-size:18px;line-height:1.1}
+  .stat span{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.7px}
+  .stat.hot b{color:var(--red)} .stat.warn b{color:var(--amber)}
+  main{display:grid;grid-template-columns:minmax(360px,1fr) minmax(420px,1.1fr);
+       gap:16px;padding:16px;align-items:start}
+  @media(max-width:900px){main{grid-template-columns:1fr}}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  h2{margin:0;padding:11px 15px;font-size:11px;letter-spacing:1px;text-transform:uppercase;
+     color:var(--dim);border-bottom:1px solid var(--line);font-weight:600}
+  .sess{padding:13px 15px;border-bottom:1px solid var(--line)}
+  .sess:last-child{border-bottom:0}
+  .sess-top{display:flex;align-items:center;gap:9px;margin-bottom:5px}
+  .who{font-weight:700;color:var(--cyan)}
+  .sid{color:var(--dim);font-size:11px}
+  .branch{margin-left:auto;color:var(--dim);font-size:11px}
+  .intent{color:var(--ink);opacity:.85;margin:4px 0 8px;font-size:12px;
+          overflow-wrap:anywhere}
+  .intent.none{color:var(--dim);font-style:italic;opacity:.6}
+  .holds{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{background:#1c1408;border:1px solid #3d2f10;color:var(--amber);
+        border-radius:5px;padding:2px 8px;font-size:11px}
+  .chip .t{color:var(--dim);margin-left:5px}
+  .chip.idle{background:#0d1117;border-color:var(--line);color:var(--dim)}
+  #feed{max-height:70vh;overflow-y:auto;padding:6px 0}
+  .ev{display:flex;gap:10px;padding:4px 15px;align-items:baseline;
+      border-left:2px solid transparent}
+  .ev time{color:var(--dim);font-size:11px;flex:none;width:60px}
+  .ev .u{color:var(--cyan);flex:none;width:78px;overflow:hidden;text-overflow:ellipsis;
+         white-space:nowrap}
+  .ev .k{flex:none;width:74px;font-weight:700;font-size:11px;letter-spacing:.5px}
+  .ev .d{color:var(--ink);opacity:.8;overflow-wrap:anywhere}
+  .ev.new{animation:flash .8s ease-out}
+  @keyframes flash{from{background:#1c2733}to{background:transparent}}
+  .k.claim{color:var(--green)} .k.wrote{color:var(--dim)}
+  .k.blocked{color:var(--red)} .k.ungated{color:var(--amber)}
+  .k.joined{color:var(--violet)} .k.intent{color:var(--dim)}
+  .k.left{color:var(--dim)} .k.released{color:var(--dim)}
+  .ev.blocked{border-left-color:var(--red);background:#1a0f10}
+  .ev.ungated{border-left-color:var(--amber);background:#1a1408}
+  .empty{padding:26px 15px;color:var(--dim);text-align:center;font-style:italic}
+  footer{padding:10px 20px;color:var(--dim);font-size:11px;border-top:1px solid var(--line)}
+</style>
+
+<header>
+  <div class="brand"><span class="dot" id="dot"></span>coord</div>
+  <select id="repo"></select>
+  <div class="stats">
+    <div class="stat"><b id="s-sessions">0</b><span>sessions</span></div>
+    <div class="stat"><b id="s-claims">0</b><span>claims</span></div>
+    <div class="stat"><b id="s-writes">0</b><span>writes</span></div>
+    <div class="stat" id="w-blocked"><b id="s-blocked">0</b><span>blocked</span></div>
+    <div class="stat" id="w-ungated"><b id="s-ungated">0</b><span>ungated</span></div>
+  </div>
+</header>
+
+<main>
+  <section>
+    <h2>Active sessions</h2>
+    <div id="sessions"><div class="empty">no active sessions</div></div>
+  </section>
+  <section>
+    <h2>Live events</h2>
+    <div id="feed"><div class="empty">waiting for activity…</div></div>
+  </section>
+</main>
+<footer id="foot">connecting…</footer>
+
+<script>
+const LEASE_MS = 600000;
+let ws, repo = new URLSearchParams(location.search).get('repo');
+let sessions = new Map(), claims = [], lastWrite = new Map();
+let stats = {writes:0, blocked:0, ungated:0};
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const hhmm = ts => new Date(ts).toLocaleTimeString([], {hour12:false});
+const short = s => String(s).slice(0,8);
+
+async function boot(){
+  const repos = await fetch('/api/repos').then(r => r.json()).catch(() => []);
+  const sel = $('repo');
+  sel.innerHTML = repos.map(r => `<option>${esc(r)}</option>`).join('') || '<option>—</option>';
+  if (!repo || !repos.includes(repo)) repo = repos[0];
+  if (repo) sel.value = repo;
+  sel.onchange = () => { repo = sel.value; resetView(); connect(); };
+  if (repo) { await history(); connect(); }
+  else $('foot').textContent = 'no repos yet — run `coord init` in a repo and start a session';
+}
+
+function resetView(){
+  sessions = new Map(); claims = []; lastWrite = new Map();
+  stats = {writes:0, blocked:0, ungated:0};
+  $('feed').innerHTML = ''; render();
+  if (ws) { ws.onclose = null; ws.close(); }
+}
+
+// Replay stored history so the page is useful the moment it opens.
+async function history(){
+  const evs = await fetch('/api/events?repo=' + encodeURIComponent(repo)).then(r => r.json()).catch(() => []);
+  for (const e of evs) apply(e, false);
+  render();
+}
+
+function connect(){
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onopen = () => {
+    $('dot').classList.add('on');
+    $('foot').textContent = 'live · ' + repo;
+    ws.send(JSON.stringify({type:'hello', repo, daemon:'web'}));
+  };
+  ws.onmessage = m => {
+    const msg = JSON.parse(m.data);
+    if (msg.type === 'welcome'){
+      sessions = new Map((msg.sessions||[]).map(s => [s.session, s]));
+      claims = msg.claims || [];
+      render();
+    } else if (msg.type === 'event'){
+      apply(msg.event, true); render();
+    }
+  };
+  ws.onclose = () => {
+    $('dot').classList.remove('on');
+    $('foot').textContent = 'disconnected — retrying…';
+    setTimeout(connect, 2000);
+  };
+}
+
+function apply(e, live){
+  const t = e.type;
+  if (t === 'session_started'){
+    sessions.set(e.session, {session:e.session, user:e.user, branch:e.branch, intent:'', last_seen:e.ts});
+  } else if (t === 'intent_declared'){
+    const s = sessions.get(e.session); if (s){ s.intent = e.text; s.last_seen = e.ts; }
+  } else if (t === 'claim_acquired'){
+    const c = claims.find(c => c.session === e.session && c.path === e.path);
+    if (c) c.lease_until = e.lease_until;
+    else claims.push({session:e.session, user:e.user, path:e.path, lease_until:e.lease_until, intent:e.intent});
+  } else if (t === 'claim_released'){
+    claims = claims.filter(c => !(c.session === e.session && c.path === e.path));
+  } else if (t === 'file_written'){
+    stats.writes++; lastWrite.set(e.path, e.session);
+  } else if (t === 'claim_denied'){
+    stats.blocked++;
+  } else if (t === 'ungated_write'){
+    stats.ungated++;
+  } else if (t === 'session_ended'){
+    sessions.delete(e.session); claims = claims.filter(c => c.session !== e.session);
+  }
+  feed(e, live);
+}
+
+const KIND = {
+  session_started:['joined','joined'], intent_declared:['intent','intent'],
+  claim_acquired:['claim','claimed'], claim_released:['released','released'],
+  file_written:['wrote','wrote'], claim_denied:['blocked','BLOCKED'],
+  ungated_write:['ungated','UNGATED'], session_ended:['left','left'],
+};
+
+function feed(e, live){
+  const [cls, label] = KIND[e.type] || ['intent', e.type];
+  const who = e.user || (sessions.get(e.session)?.user) || short(e.session);
+  let detail = '';
+  if (e.type === 'intent_declared') detail = e.text;
+  else if (e.type === 'claim_denied') detail = `${e.path} — held by ${e.holder_user}`;
+  else if (e.type === 'ungated_write') detail = `${e.path} — wrote over ${e.holder_user}`;
+  else if (e.path) detail = e.path;
+  else if (e.type === 'session_started') detail = 'branch ' + e.branch;
+
+  const row = document.createElement('div');
+  row.className = 'ev ' + (e.type === 'claim_denied' ? 'blocked' : e.type === 'ungated_write' ? 'ungated' : '') + (live ? ' new' : '');
+  row.innerHTML = `<time>${hhmm(e.ts || Date.now())}</time>`
+    + `<span class="u">${esc(who)}</span>`
+    + `<span class="k ${cls}">${label}</span>`
+    + `<span class="d">${esc(detail)}</span>`;
+  const f = $('feed');
+  if (f.querySelector('.empty')) f.innerHTML = '';
+  f.appendChild(row);
+  while (f.children.length > 400) f.removeChild(f.firstChild);
+  f.scrollTop = f.scrollHeight;
+}
+
+function render(){
+  const now = Date.now();
+  claims = claims.filter(c => c.lease_until > now);
+  $('s-sessions').textContent = sessions.size;
+  $('s-claims').textContent = claims.length;
+  $('s-writes').textContent = stats.writes;
+  $('s-blocked').textContent = stats.blocked;
+  $('s-ungated').textContent = stats.ungated;
+  $('w-blocked').className = 'stat' + (stats.blocked ? ' hot' : '');
+  $('w-ungated').className = 'stat' + (stats.ungated ? ' warn' : '');
+
+  const box = $('sessions');
+  if (!sessions.size){ box.innerHTML = '<div class="empty">no active sessions</div>'; return; }
+  box.innerHTML = [...sessions.values()]
+    .sort((a,b) => (a.user||'').localeCompare(b.user||''))
+    .map(s => {
+      const held = claims.filter(c => c.session === s.session);
+      const chips = held.length
+        ? held.map(c => `<span class="chip">${esc(c.path)}<span class="t">${Math.max(0, Math.round((c.lease_until - now)/60000))}m</span></span>`).join('')
+        : '<span class="chip idle">holding nothing</span>';
+      return `<div class="sess">
+        <div class="sess-top"><span class="who">${esc(s.user)}</span>
+          <span class="sid">${short(s.session)}</span>
+          <span class="branch">${esc(s.branch)}</span></div>
+        <div class="intent ${s.intent ? '' : 'none'}">${esc(s.intent || 'no stated intent yet')}</div>
+        <div class="holds">${chips}</div></div>`;
+    }).join('');
+}
+
+setInterval(render, 1000);
+boot();
+</script>
