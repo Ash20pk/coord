@@ -32,6 +32,7 @@
   main{flex:1;display:grid;grid-template-columns:1fr 380px;min-height:0}
   @media(max-width:1100px){main{grid-template-columns:1fr}}
   #terms{display:grid;grid-template-rows:1fr 1fr;min-height:0;min-width:0}
+  #terms.quad{grid-template-columns:1fr 1fr}
   .term{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line);
         border-bottom:1px solid var(--line)}
   .term-bar{flex:none;display:flex;align-items:center;gap:9px;padding:6px 12px;
@@ -154,7 +155,13 @@ async function boot(){
   if (!agents.length){
     $('terms').innerHTML = '<div class="empty">no terminals — start the relay with --lab-dir</div>';
   } else {
-    $('terms').style.gridTemplateRows = `repeat(${agents.length}, 1fr)`;
+    const box = $('terms');
+    if (agents.length > 2){
+      box.classList.add('quad');
+      box.style.gridTemplateRows = `repeat(${Math.ceil(agents.length/2)}, 1fr)`;
+    } else {
+      box.style.gridTemplateRows = `repeat(${agents.length}, 1fr)`;
+    }
     agents.forEach((n, i) => mountTerm(i, n));
   }
 

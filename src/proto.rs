@@ -11,9 +11,11 @@ pub fn now_ms() -> Ts {
 }
 
 pub const LEASE_MS: u64 = 10 * 60 * 1000; // 10 min, renewed on activity
-/// A session with no activity for this long is treated as gone. Presence is
-/// only useful if it decays: otherwise agents reason about peers that left.
-pub const SESSION_STALE_MS: u64 = 20 * 60 * 1000;
+/// A session with no activity for this long is treated as gone. This must be
+/// far longer than a human pause: a session idle at its prompt is alive, and
+/// pruning it destroys identity for the rest of the run. Claims are made safe
+/// by leases, not by this.
+pub const SESSION_STALE_MS: u64 = 12 * 60 * 60 * 1000;
 
 /// Everything that happens is an event on the per-repo sequenced log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +36,11 @@ pub enum Event {
         holder_user: String,
         ts: Ts,
     },
+    /// A path a peer was waiting on has been freed.
+    PathFreed { path: String, by_session: String, by_user: String, intent: String, ts: Ts },
+    /// A message from one session to another (or to everyone). Sessions are
+    /// otherwise mute: without this, a blocked peer never learns it can go.
+    Message { from_session: String, from_user: String, to: Option<String>, text: String, ts: Ts },
     /// A blocked edit attempt. Carries no state change, but it is the signal
     /// that matters: it makes collisions visible and measurable.
     ClaimDenied {
@@ -82,6 +89,14 @@ pub struct Claim {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Waiter {
+    pub session: String,
+    pub user: String,
+    pub path: String,
+    pub since: Ts,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub session: String,
     pub user: String,
@@ -103,6 +118,8 @@ pub fn paths_overlap(a: &str, b: &str) -> bool {
 pub struct View {
     pub claims: Vec<Claim>,
     pub sessions: HashMap<String, SessionInfo>,
+    /// Sessions blocked on a path, waiting for it to free up.
+    pub waiters: Vec<Waiter>,
     /// Who last wrote each path, and when. The working-tree audit is blind to
     /// authorship — the tree is shared — so it consults this instead of
     /// assuming every change inside its window was its own.
@@ -125,6 +142,7 @@ impl View {
         for k in stale {
             self.sessions.remove(&k);
             self.claims.retain(|c| c.session != k);
+            self.waiters.retain(|w| w.session != k);
         }
     }
 
@@ -133,6 +151,15 @@ impl View {
         self.last_write
             .get(path)
             .is_some_and(|(who, ts)| who != session && *ts + 250 >= since)
+    }
+
+    /// Sessions waiting on a path that overlaps `path`, excluding `except`.
+    pub fn waiters_for(&self, path: &str, except: &str) -> Vec<Waiter> {
+        self.waiters
+            .iter()
+            .filter(|w| w.session != except && paths_overlap(&w.path, path))
+            .cloned()
+            .collect()
     }
 
     /// First live claim held by a *different* session that overlaps `path`.
@@ -167,6 +194,7 @@ impl View {
                 if let Some(s) = self.sessions.get_mut(session) {
                     s.last_seen = now_ms();
                 }
+                self.waiters.retain(|w| !(w.session == *session && w.path == *path));
                 // Renew if this session already holds it, else insert.
                 if let Some(c) = self
                     .claims
@@ -199,7 +227,25 @@ impl View {
                     s.last_seen = *ts;
                 }
             }
-            Event::ClaimDenied { .. } => {} // observability only
+            Event::ClaimDenied { session, user, path, .. } => {
+                // A denial is also a subscription: this session wants the path.
+                if !self
+                    .waiters
+                    .iter()
+                    .any(|w| w.session == *session && w.path == *path)
+                {
+                    self.waiters.push(Waiter {
+                        session: session.clone(),
+                        user: user.clone(),
+                        path: path.clone(),
+                        since: now_ms(),
+                    });
+                }
+            }
+            Event::PathFreed { path, .. } => {
+                self.waiters.retain(|w| !paths_overlap(&w.path, path));
+            }
+            Event::Message { .. } => {}
             Event::UngatedWrite { .. } => {} // observability only
             Event::SessionEnded { session, .. } => {
                 self.claims.retain(|c| c.session != *session);
@@ -217,8 +263,17 @@ pub enum DReq {
     PreWrite { repo_root: String, session: String, path: String },
     PostWrite { repo_root: String, session: String, path: String },
     SessionStart { repo_root: String, session: String, user: String, branch: String },
-    Intent { repo_root: String, session: String, text: String },
+    Intent { repo_root: String, session: String, text: String, user: String },
     SessionEnd { repo_root: String, session: String },
+    /// Send a message to a peer user, or to everyone when `to` is None.
+    /// Identity travels with the request: Claude Code exposes no session id to
+    /// the commands it runs, so a CLI caller can only know who it is.
+    Msg { repo_root: String, from_user: String, to: Option<String>, text: String },
+    /// Drain this user's mailbox.
+    Poll { repo_root: String, user: String },
+    /// The agent is trying to finish its turn. Pending mail is a reason to
+    /// keep going, so this answers with anything undelivered.
+    StopCheck { repo_root: String, user: String, already_continued: bool },
     /// A Bash command about to run: parse it for write targets and gate them.
     BashPre { repo_root: String, session: String, command: String },
     /// A Bash command that finished: diff the working tree if it was audited.
@@ -230,6 +285,7 @@ pub enum DReq {
 #[serde(tag = "resp", rename_all = "snake_case")]
 pub enum DResp {
     Decision { allow: bool, reason: Option<String> },
+    Mail { items: Vec<String> },
     Peers { sessions: Vec<SessionInfo>, claims: Vec<Claim> },
     Ok,
     Err { msg: String },

@@ -197,3 +197,8 @@ pub fn watch_ungated(url: &str, repo: &str) -> std::sync::Arc<std::sync::atomic:
     });
     n
 }
+
+/// Blocking daemon call from a sync test context.
+pub fn ask_daemon(sock: &PathBuf, req: DReq) -> Option<DResp> {
+    coord::hook::call_daemon_at(sock, &req)
+}

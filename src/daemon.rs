@@ -23,6 +23,12 @@ pub fn socket_path() -> PathBuf {
 
 struct RepoConn {
     tx: mpsc::UnboundedSender<ClientMsg>,
+    /// Undelivered notes per user, in arrival order. Keyed by user rather
+    /// than session because a CLI caller cannot learn its own session id.
+    mail: Arc<Mutex<HashMap<String, std::collections::VecDeque<String>>>>,
+    /// Consecutive turn-endings we have interrupted, per user, so a
+    /// notification can never trap an agent in a loop.
+    stop_holds: Arc<Mutex<HashMap<String, u32>>>,
     view: Arc<Mutex<View>>,
     connected: Arc<Mutex<bool>>,
     /// True once a Welcome snapshot has been applied, i.e. the mirror is
@@ -94,6 +100,7 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             let Some(rc) = ensure_repo(d, &repo_root).await else {
                 return DResp::Decision { allow: true, reason: None }; // not coord-enabled → fail open
             };
+            ensure_session(&rc, &session, &whoami());
             let path = rel_path(&repo_root, &path);
 
             // Hot path: local mirror check, microseconds. When it fires we
@@ -181,8 +188,9 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                 claims: v.claims.iter().filter(|c| c.session != session).cloned().collect(),
             }
         }
-        DReq::Intent { repo_root, session, text } => {
+        DReq::Intent { repo_root, session, text, user } => {
             let Some(rc) = ensure_repo(d, &repo_root).await else { return DResp::Ok };
+            ensure_session(&rc, &session, &user);
             let ev = Event::IntentDeclared { session: session.clone(), text, ts: now_ms() };
             rc.view.lock().unwrap().apply(&ev);
             let _ = rc.tx.send(ClientMsg::Append { event: ev });
@@ -318,6 +326,55 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             }
             DResp::Ok
         }
+        DReq::Msg { repo_root, from_user, to, text } => {
+            let Some(rc) = ensure_repo(d, &repo_root).await else {
+                return DResp::Err { msg: "repo not coord-enabled".into() };
+            };
+            let from_session = {
+                let v = rc.view.lock().unwrap();
+                v.sessions
+                    .values()
+                    .find(|s| s.user.eq_ignore_ascii_case(&from_user))
+                    .map(|s| s.session.clone())
+                    .unwrap_or_default()
+            };
+            let ev = Event::Message {
+                from_session,
+                from_user,
+                to,
+                text,
+                ts: now_ms(),
+            };
+            let _ = rc.tx.send(ClientMsg::Append { event: ev });
+            DResp::Ok
+        }
+        DReq::Poll { repo_root, user } => {
+            let Some(rc) = ensure_repo(d, &repo_root).await else {
+                return DResp::Mail { items: vec![] };
+            };
+            DResp::Mail { items: drain_mail(&rc, &user) }
+        }
+        DReq::StopCheck { repo_root, user, already_continued } => {
+            let Some(rc) = ensure_repo(d, &repo_root).await else {
+                return DResp::Mail { items: vec![] };
+            };
+            // Cap how often mail may interrupt a finish, so a chatty peer
+            // cannot keep a session spinning.
+            let holds = {
+                let mut h = rc.stop_holds.lock().unwrap();
+                let n = h.entry(user.to_lowercase()).or_insert(0);
+                if already_continued {
+                    *n += 1;
+                } else {
+                    *n = 0;
+                }
+                *n
+            };
+            if holds >= 3 {
+                return DResp::Mail { items: vec![] };
+            }
+            DResp::Mail { items: drain_mail(&rc, &user) }
+        }
         DReq::Who { repo_root } => {
             let Some(rc) = ensure_repo(d, &repo_root).await else {
                 return DResp::Err { msg: "repo not coord-enabled (run `coord init`)".into() };
@@ -331,6 +388,103 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             }
         }
     }
+}
+
+/// Translate events other sessions caused into notes for our own sessions.
+/// Must run before the view applies the event, since PathFreed clears waiters.
+fn deliver(rc: &Arc<RepoConn>, ev: &Event) {
+    let notes: Vec<(String, String)> = {
+        let v = rc.view.lock().unwrap();
+        match ev {
+            Event::PathFreed { path, by_user, intent, by_session, .. } => v
+                .waiters_for(path, by_session)
+                .into_iter()
+                .map(|w| {
+                    let key = w.user.to_lowercase();
+                    let why = if intent.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(" Their task was: \"{}\".", truncate(intent, 160))
+                    };
+                    (
+                        key,
+                        format!(
+                            "coord: `{path}` is free now — {by_user} released it.{why} \
+                             You were blocked on this file; you can proceed with it."
+                        ),
+                    )
+                })
+                .collect(),
+            Event::Message { from_user, to, text, .. } => {
+                let scope = if to.is_some() { "" } else { " (to everyone)" };
+                let note = format!("coord: message from {from_user}{scope}: {text}");
+                match to {
+                    // Addressed: deliver even if that user has no live session
+                    // yet, so the note is waiting when they arrive.
+                    Some(t) if !t.eq_ignore_ascii_case(from_user) => {
+                        vec![(t.to_lowercase(), note)]
+                    }
+                    Some(_) => Vec::new(),
+                    None => v
+                        .sessions
+                        .values()
+                        .map(|s| s.user.to_lowercase())
+                        .filter(|u| !u.eq_ignore_ascii_case(from_user))
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .map(|u| (u, note.clone()))
+                        .collect(),
+                }
+            }
+            _ => Vec::new(),
+        }
+    };
+    if notes.is_empty() {
+        return;
+    }
+    let mut mail = rc.mail.lock().unwrap();
+    for (session, note) in notes {
+        let q = mail.entry(session).or_default();
+        if q.len() < 32 {
+            q.push_back(note);
+        }
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    let one: String = s.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    if one.chars().count() <= n {
+        one
+    } else {
+        format!("{}…", one.chars().take(n - 1).collect::<String>())
+    }
+}
+
+fn drain_mail(rc: &Arc<RepoConn>, user: &str) -> Vec<String> {
+    rc.mail
+        .lock()
+        .unwrap()
+        .get_mut(&user.to_lowercase())
+        .map(|q| q.drain(..).collect())
+        .unwrap_or_default()
+}
+
+/// A session that activity arrives for but the view has never heard of must be
+/// re-registered, not mislabelled. This is what a long idle gap used to break:
+/// presence was pruned and every later claim was attributed to the OS user.
+fn ensure_session(rc: &Arc<RepoConn>, session: &str, user: &str) {
+    let known = rc.view.lock().unwrap().sessions.contains_key(session);
+    if known {
+        return;
+    }
+    let ev = Event::SessionStarted {
+        session: session.to_string(),
+        user: user.to_string(),
+        branch: String::new(),
+        ts: now_ms(),
+    };
+    rc.view.lock().unwrap().apply(&ev);
+    let _ = rc.tx.send(ClientMsg::Append { event: ev });
 }
 
 /// Record a denial so collisions caught by the local mirror still reach the log.
@@ -472,12 +626,13 @@ fn deny(path: &str, c: &Claim) -> DResp {
         allow: false,
         reason: Some(format!(
             "coord: `{path}` is currently claimed by {} (session {}…) — intent: {}. Lease expires in ~{}m. \
-             Do not edit this file now: re-plan around it, work on something else, or tell the user so they can coordinate. \
-             `coord who` shows all active sessions.",
+             Do not edit this file now: work on something else, or wait — you will be told automatically when it is released. \
+             To coordinate directly, run: coord msg {} \"your question\". `coord who` lists all active sessions.",
             c.user,
             &c.session[..c.session.len().min(8)],
             intent,
-            mins.max(1)
+            mins.max(1),
+            c.user,
         )),
     }
 }
@@ -501,6 +656,8 @@ async fn ensure_repo(d: &Arc<Daemon>, repo_root: &str) -> Option<Arc<RepoConn>> 
     let rc = Arc::new(RepoConn {
         tx,
         view: Arc::new(Mutex::new(View::default())),
+        mail: Arc::new(Mutex::new(HashMap::new())),
+        stop_holds: Arc::new(Mutex::new(HashMap::new())),
         connected: Arc::new(Mutex::new(false)),
         ready: Arc::new(Mutex::new(false)),
         pending: Arc::new(Mutex::new(HashMap::new())),
@@ -551,6 +708,7 @@ async fn relay_loop(cfg: RepoConfig, rc: Arc<RepoConn>, mut rx: mpsc::UnboundedR
                                     *rc.ready.lock().unwrap() = true;
                                 }
                                 ServerMsg::Event { event, .. } => {
+                                    deliver(&rc, &event);
                                     rc.view.lock().unwrap().apply(&event);
                                 }
                                 ServerMsg::ClaimResp { ref id, .. } => {

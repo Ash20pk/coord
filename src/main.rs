@@ -48,6 +48,19 @@ enum Cmd {
     Who,
     /// Live dashboard of sessions, claims, and collisions on this repo
     Watch,
+    /// Message a peer session, or everyone. Agents use this to coordinate.
+    Msg {
+        /// Peer user name, or "all"
+        to: String,
+        /// Message text
+        text: Vec<String>,
+    },
+    /// Read and clear pending notifications for this user
+    Inbox {
+        /// User name (defaults to $COORD_USER, else $USER)
+        #[arg(long)]
+        user: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -65,6 +78,8 @@ async fn main() -> Result<()> {
         }
         Cmd::Init { relay, repo } => init(relay, repo),
         Cmd::Who => who(),
+        Cmd::Msg { to, text } => msg(to, text.join(" ")),
+        Cmd::Inbox { user } => inbox(user),
         Cmd::Watch => {
             let root = config::find_repo_root(&std::env::current_dir()?)
                 .context("no .coord.toml found — run `coord init` first")?;
@@ -134,6 +149,7 @@ fn init(relay: String, repo: Option<String>) -> Result<()> {
         ("SessionStart", None),
         ("UserPromptSubmit", None),
         ("SessionEnd", None),
+        ("Stop", None),
     ];
     for (event, matcher) in entries {
         let arr = hooks
@@ -167,6 +183,65 @@ fn init(relay: String, repo: Option<String>) -> Result<()> {
     println!("  2. start the local daemon:           coord daemon");
     println!("  3. restart Claude Code sessions in this repo — they now coordinate.");
     Ok(())
+}
+
+fn repo_root_or_bail() -> Result<PathBuf> {
+    config::find_repo_root(&std::env::current_dir()?)
+        .context("no .coord.toml found — run `coord init` first")
+}
+
+/// Who this CLI invocation speaks for. Mirrors the hook's rule so a message
+/// and a notification agree on identity.
+fn cli_user() -> String {
+    std::env::var("COORD_USER")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("USER").ok())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn msg(to: String, text: String) -> Result<()> {
+    if text.trim().is_empty() {
+        anyhow::bail!("nothing to send: coord msg <user|all> \"your message\"");
+    }
+    let root = repo_root_or_bail()?;
+    let to = if to.eq_ignore_ascii_case("all") { None } else { Some(to) };
+    let req = DReq::Msg {
+        repo_root: root.to_string_lossy().to_string(),
+        from_user: cli_user(),
+        to: to.clone(),
+        text,
+    };
+    match hook::call_daemon(&req) {
+        Some(DResp::Err { msg }) => anyhow::bail!(msg),
+        Some(_) => {
+            println!("sent to {}", to.unwrap_or_else(|| "everyone".into()));
+            Ok(())
+        }
+        None => anyhow::bail!("coordd not running — start it with `coord daemon`"),
+    }
+}
+
+fn inbox(user: Option<String>) -> Result<()> {
+    let root = repo_root_or_bail()?;
+    let req = DReq::Poll {
+        repo_root: root.to_string_lossy().to_string(),
+        user: user.unwrap_or_else(cli_user),
+    };
+    match hook::call_daemon(&req) {
+        Some(DResp::Mail { items }) if items.is_empty() => {
+            println!("no new messages");
+            Ok(())
+        }
+        Some(DResp::Mail { items }) => {
+            for i in items {
+                println!("{i}");
+            }
+            Ok(())
+        }
+        Some(DResp::Err { msg }) => anyhow::bail!(msg),
+        _ => anyhow::bail!("coordd not running — start it with `coord daemon`"),
+    }
 }
 
 fn who() -> Result<()> {

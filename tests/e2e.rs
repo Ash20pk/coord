@@ -7,6 +7,7 @@
 
 mod common;
 use common::*;
+use coord::proto::{DReq, DResp};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -117,7 +118,8 @@ async fn conflicting_edit_emits_a_deny_decision_with_a_usable_brief() {
         reason.contains("refactor the auth session handling"),
         "brief must carry the holder's intent: {reason}"
     );
-    assert!(reason.contains("re-plan"), "brief must tell the model what to do: {reason}");
+    assert!(reason.contains("coord msg"), "brief must offer a way to coordinate: {reason}");
+    assert!(reason.contains("released"), "brief must promise a release notification: {reason}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -653,4 +655,199 @@ async fn an_ungated_write_is_still_caught_while_the_holder_writes_continuously()
         if ungated.load(std::sync::atomic::Ordering::SeqCst) > 0 { found = true; break; }
     }
     assert!(found, "a busy holder must not mask an intruder's ungated write");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blocked_session_is_told_when_the_path_is_released() {
+    // The gap that made this not really multiplayer: a blocked session waited
+    // on a lease it could not observe, and nobody told it when work finished.
+    let (sock, root) = scenario("notify").await;
+    let rs = root.to_string_lossy().to_string();
+
+    for s in ["holder", "waiter"] {
+        hook(&sock, json!({ "hook_event_name": "SessionStart", "session_id": s, "cwd": rs }));
+    }
+    hook(&sock, json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": "holder",
+        "cwd": rs, "prompt": "refactor the auth module"
+    }));
+    hook(&sock, edit(&root, "holder", "src/auth.ts", "PreToolUse"));
+
+    // waiter is blocked, which registers its interest.
+    assert!(
+        hook(&sock, edit(&root, "waiter", "src/auth.ts", "PreToolUse")).is_some(),
+        "waiter should be blocked"
+    );
+    // Nothing pending yet: being blocked is not itself news.
+    assert!(hook(&sock, json!({
+        "hook_event_name": "Stop", "session_id": "waiter", "cwd": rs, "stop_hook_active": false
+    })).is_none());
+
+    // The holder finishes.
+    hook(&sock, json!({ "hook_event_name": "SessionEnd", "session_id": "holder", "cwd": rs }));
+
+    // The waiter must be woken with the news, via the Stop hook.
+    let mut got = None;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Some(out) = hook(&sock, json!({
+            "hook_event_name": "Stop", "session_id": "waiter", "cwd": rs, "stop_hook_active": false
+        })) {
+            got = Some(out);
+            break;
+        }
+    }
+    let out = got.expect("waiter must be notified that the path was released");
+    assert_eq!(out["decision"], "block", "the notification must send it back to work");
+    let reason = out["reason"].as_str().unwrap();
+    assert!(reason.contains("src/auth.ts"), "must name the freed path: {reason}");
+    assert!(reason.contains("free"), "must say it is available: {reason}");
+    assert!(
+        reason.contains("refactor the auth module"),
+        "must carry what the holder was doing: {reason}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sessions_can_message_each_other() {
+    let (sock, root) = scenario("msg").await;
+    let rs = root.to_string_lossy().to_string();
+    for (s, u) in [("s-ash", "ash"), ("s-priya", "priya")] {
+        hook_as(&sock, json!({ "hook_event_name": "SessionStart", "session_id": s, "cwd": rs }), Some(u));
+    }
+
+    let sent = ask_daemon(&sock, DReq::Msg {
+        repo_root: rs.clone(),
+        from_user: "ash".into(),
+        to: Some("priya".into()),
+        text: "I'm done with auth.js, it's yours".into(),
+    });
+    assert!(matches!(sent, Some(DResp::Ok)), "send should succeed: {sent:?}");
+
+    // priya learns of it when finishing a turn; ash does not hear its own note.
+    let mut delivered = None;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Some(out) = hook_as(&sock, json!({
+            "hook_event_name": "Stop", "session_id": "s-priya", "cwd": rs, "stop_hook_active": false
+        }), Some("priya")) {
+            delivered = Some(out);
+            break;
+        }
+    }
+    let out = delivered.expect("priya must receive the message");
+    let reason = out["reason"].as_str().unwrap();
+    assert!(reason.contains("from ash"), "must name the sender: {reason}");
+    assert!(reason.contains("it's yours"), "must carry the text: {reason}");
+
+    assert!(
+        hook_as(&sock, json!({
+            "hook_event_name": "Stop", "session_id": "s-ash", "cwd": rs, "stop_hook_active": false
+        }), Some("ash")).is_none(),
+        "a sender must not be notified of its own message"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn notifications_cannot_trap_a_session_in_a_loop() {
+    let (sock, root) = scenario("loop").await;
+    let rs = root.to_string_lossy().to_string();
+    for (s, u) in [("s-a", "ash"), ("s-b", "bee")] {
+        hook_as(&sock, json!({ "hook_event_name": "SessionStart", "session_id": s, "cwd": rs }), Some(u));
+    }
+
+    // A peer that will not stop talking.
+    for i in 0..8 {
+        ask_daemon(&sock, DReq::Msg {
+            repo_root: rs.clone(), from_user: "ash".into(),
+            to: Some("bee".into()), text: format!("note {i}"),
+        });
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Simulate repeated continuations: after a few, stop must be allowed.
+    let mut blocked = 0;
+    for _ in 0..6 {
+        let out = hook_as(&sock, json!({
+            "hook_event_name": "Stop", "session_id": "s-b", "cwd": rs, "stop_hook_active": true
+        }), Some("bee"));
+        if out.is_some() { blocked += 1; } else { break; }
+    }
+    assert!(blocked <= 3, "a chatty peer must not keep a session spinning (blocked {blocked}x)");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn message_identity_comes_from_the_caller_not_the_os_user() {
+    // Observed live: 28 messages between four agents all showed "from ash",
+    // because Claude Code exposes no session id to the commands it runs and
+    // the daemon fell back to the OS user.
+    let (sock, root) = scenario("identity").await;
+    let rs = root.to_string_lossy().to_string();
+    for (s, u) in [("s-sam", "sam"), ("s-priya", "priya")] {
+        hook_as(&sock, json!({ "hook_event_name": "SessionStart", "session_id": s, "cwd": rs }), Some(u));
+    }
+
+    ask_daemon(&sock, DReq::Msg {
+        repo_root: rs.clone(),
+        from_user: "sam".into(),
+        to: Some("priya".into()),
+        text: "billing.js is ready".into(),
+    });
+
+    let mut got = None;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Some(out) = hook_as(&sock, json!({
+            "hook_event_name": "Stop", "session_id": "s-priya", "cwd": rs, "stop_hook_active": false
+        }), Some("priya")) { got = Some(out); break; }
+    }
+    let reason = got.expect("priya must get it")["reason"].as_str().unwrap().to_string();
+    assert!(reason.contains("from sam"), "sender must be sam, not the OS user: {reason}");
+    assert!(!reason.contains("testuser"), "must not fall back to $USER: {reason}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_broadcast_reaches_every_peer_but_not_the_sender() {
+    let (sock, root) = scenario("broadcast2").await;
+    let rs = root.to_string_lossy().to_string();
+    for (s, u) in [("s-a", "ash"), ("s-b", "bee"), ("s-c", "cat")] {
+        hook_as(&sock, json!({ "hook_event_name": "SessionStart", "session_id": s, "cwd": rs }), Some(u));
+    }
+    ask_daemon(&sock, DReq::Msg {
+        repo_root: rs.clone(), from_user: "ash".into(), to: None,
+        text: "goal is green, stop editing".into(),
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    for u in ["bee", "cat"] {
+        let out = hook_as(&sock, json!({
+            "hook_event_name": "Stop", "session_id": "s", "cwd": rs, "stop_hook_active": false
+        }), Some(u));
+        let reason = out.unwrap_or_else(|| panic!("{u} must receive the broadcast"))["reason"]
+            .as_str().unwrap().to_string();
+        assert!(reason.contains("to everyone"), "{u} should see it was a broadcast: {reason}");
+    }
+    assert!(
+        hook_as(&sock, json!({
+            "hook_event_name": "Stop", "session_id": "s-a", "cwd": rs, "stop_hook_active": false
+        }), Some("ash")).is_none(),
+        "the sender must not receive its own broadcast"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_idle_past_the_old_prune_window_keeps_its_identity() {
+    // The run that exposed this had a 41-minute gap between startup and the
+    // first prompt; every later claim was then attributed to the OS user.
+    let mut v = coord::proto::View::default();
+    v.apply(&coord::proto::Event::SessionStarted {
+        session: "s1".into(), user: "sam".into(), branch: "main".into(),
+        ts: coord::proto::now_ms() - 45 * 60 * 1000,
+    });
+    v.prune();
+    assert_eq!(
+        v.sessions.get("s1").map(|s| s.user.as_str()),
+        Some("sam"),
+        "45 minutes idle at a prompt is alive, not stale"
+    );
 }

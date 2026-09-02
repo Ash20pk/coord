@@ -17,6 +17,7 @@ const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const CYAN: &str = "\x1b[36m";
+const VIOLET: &str = "\x1b[35m";
 const R: &str = "\x1b[0m";
 
 struct State {
@@ -118,6 +119,19 @@ fn describe(e: &Event) -> Option<String> {
         Event::ClaimAcquired { user, path, .. } => {
             format!("{DIM}{}{R}  {CYAN}{:<9}{R} {GREEN}claim {R}  {}", clock(now_ms()), user, path)
         }
+        Event::PathFreed { path, by_user, ts, .. } => format!(
+            "{DIM}{}{R}  {CYAN}{:<9}{R} {GREEN}FREED  {R} {} {DIM}(waiters notified){R}",
+            clock(*ts),
+            by_user,
+            path
+        ),
+        Event::Message { from_user, to, text, ts, .. } => format!(
+            "{DIM}{}{R}  {CYAN}{:<9}{R} {VIOLET}MSG    {R} {}{}",
+            clock(*ts),
+            from_user,
+            to.as_ref().map(|t| format!("→{t}: ")).unwrap_or_else(|| "→all: ".into()),
+            truncate(text, 50)
+        ),
         Event::UngatedWrite { user, path, holder_user, ts, .. } => format!(
             "{DIM}{}{R}  {CYAN}{:<9}{R} {RED}UNGATED{R} {} {DIM}(wrote over {}){R}",
             clock(*ts),

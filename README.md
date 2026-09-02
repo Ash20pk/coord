@@ -150,6 +150,30 @@ Four layers:
 One test is kept **red on purpose**: `bash_write_to_a_claimed_file_is_blocked`
 (`#[ignore]`d) specifies behaviour v1 does not have. See Known gaps.
 
+## Sessions talk to each other
+
+Blocking alone is not multiplayer. A blocked session used to wait on a lease it
+could not observe, and nobody told it when the work finished.
+
+**Release notifications.** Being denied registers interest in that path. When
+the holder releases it — explicitly, by ending, or by its lease expiring — every
+waiter is told, with what the holder was doing. Delivery uses the `Stop` hook:
+the moment an agent tries to end its turn, pending news sends it back to work,
+so notice arrives in real time rather than whenever the human next types. A
+per-user cap means a chatty peer can never keep a session spinning.
+
+**Direct messages.** Agents coordinate in their own words:
+
+```sh
+coord msg priya "auth.js is yours, exports are stable"
+coord msg all "goal is green, stop editing"
+coord inbox                    # read and clear pending notes
+```
+
+Identity comes from `COORD_USER` (else `$USER`), not from a session id — Claude
+Code exposes no session id to the commands it runs, and assuming otherwise
+attributed every message to the OS user.
+
 ## Shell writes
 
 Bash is gated too, or the scheme would be optional: agents reach for `sed` and
@@ -165,6 +189,20 @@ allowed but *audited*: the working tree is fingerprinted before and after, and
 any change landing on a peer's claim is recorded as `UngatedWrite`. That is
 detection, not prevention, and the dashboard labels it that way.
 
+## What four agents on one goal actually did
+
+`lab/GOAL.md` gives the lab a shared objective — ship an invoice endpoint, four
+owners, one codebase — because tasks with no common goal collide only by
+accident. Two runs, unprompted behaviour:
+
+- 18–28 messages per run: agents announced ownership, published export
+  contracts, corrected each other when messages crossed, and declared done.
+- A session asked to edit a file another held did not attempt it. Presence told
+  it who held the file, so it sent the holder a patch and offered to wait. The
+  collision was avoided *before* the block, which is the better outcome and the
+  reason that run recorded no denials at all.
+- The tree ended green: `node test.js`, 57–58 passing.
+
 ## Known gaps
 
 - **Attribution under concurrent writes is inferred.** The working tree is
@@ -173,6 +211,8 @@ detection, not prevention, and the dashboard labels it that way.
   can be attributed to the wrong session. Observed live before the fix.
 - **Interpreters are only detected, never blocked.** `python3 -c "open(...)"`
   writes first and is recorded second.
+- **Same-name sessions share a mailbox.** Mail is keyed by user, so two
+  sessions running as the same `COORD_USER` both receive its notes.
 - **Fail-open is ambiguous by design.** An allowed edit and an unreachable
   daemon look identical from the agent's side. Tests use a positive control
   (the relay must hold the claim) to tell them apart; humans should check

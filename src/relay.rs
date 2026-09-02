@@ -27,6 +27,45 @@ struct App {
 }
 
 impl App {
+    /// Claims a session currently holds, with the intent behind them.
+    fn held_by(&self, repo: &str, session: &str) -> Vec<(String, String, String)> {
+        let mut repos = self.repos.lock().unwrap();
+        let Some(st) = repos.get_mut(repo) else { return Vec::new() };
+        st.view.prune();
+        st.view
+            .claims
+            .iter()
+            .filter(|c| c.session == session)
+            .map(|c| (c.path.clone(), c.user.clone(), c.intent.clone()))
+            .collect()
+    }
+
+    /// Tell anyone waiting that a path is theirs to take. Without this a
+    /// blocked peer waits forever on a lease it cannot observe.
+    fn announce_freed(&self, repo: &str, session: &str, freed: Vec<(String, String, String)>) {
+        for (path, user, intent) in freed {
+            let has_waiters = {
+                let repos = self.repos.lock().unwrap();
+                repos
+                    .get(repo)
+                    .map(|st| !st.view.waiters_for(&path, session).is_empty())
+                    .unwrap_or(false)
+            };
+            if has_waiters {
+                self.commit(
+                    repo,
+                    Event::PathFreed {
+                        path,
+                        by_session: session.to_string(),
+                        by_user: user,
+                        intent,
+                        ts: now_ms(),
+                    },
+                );
+            }
+        }
+    }
+
     /// Sequence, persist, apply, broadcast. The heart of the relay.
     fn commit(&self, repo: &str, ev: Event) -> u64 {
         let seq = {
@@ -84,6 +123,49 @@ pub struct LabOpts {
     pub program: String,
 }
 
+/// Leases expire without anyone acting, so nothing would announce those paths.
+/// This sweeps for them and notifies whoever was waiting.
+fn spawn_expiry_sweeper(app: Arc<App>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            tick.tick().await;
+            let expired: Vec<(String, String, String, String, String)> = {
+                let mut repos = app.repos.lock().unwrap();
+                let now = now_ms();
+                let mut out = Vec::new();
+                for (repo, st) in repos.iter_mut() {
+                    for c in st.view.claims.iter().filter(|c| c.lease_until <= now) {
+                        if !st.view.waiters_for(&c.path, &c.session).is_empty() {
+                            out.push((
+                                repo.clone(),
+                                c.session.clone(),
+                                c.path.clone(),
+                                c.user.clone(),
+                                c.intent.clone(),
+                            ));
+                        }
+                    }
+                    st.view.prune();
+                }
+                out
+            };
+            for (repo, session, path, user, intent) in expired {
+                app.commit(
+                    &repo,
+                    Event::PathFreed {
+                        path,
+                        by_session: session,
+                        by_user: user,
+                        intent: format!("{intent} (lease expired)"),
+                        ts: now_ms(),
+                    },
+                );
+            }
+        }
+    });
+}
+
 pub async fn run(listen: String, db_path: PathBuf, lab: Option<LabOpts>) -> Result<()> {
     let (listener, mut app) = prepare(&listen, db_path.clone()).await?;
     if let Some(l) = lab {
@@ -92,6 +174,7 @@ pub async fn run(listen: String, db_path: PathBuf, lab: Option<LabOpts>) -> Resu
         Arc::get_mut(&mut app).expect("sole owner before serving").terms = Some(terms);
     }
     let has_terms = app.terms.is_some();
+    spawn_expiry_sweeper(app.clone());
     let router = routes(app);
     let shown = listen.replace("0.0.0.0", "127.0.0.1");
     eprintln!("coord relay listening on ws://{listen}/ws (audit log: {})", db_path.display());
@@ -288,10 +371,30 @@ async fn client(sock: WebSocket, app: Arc<App>) -> Result<()> {
         match cm {
             ClientMsg::Hello { .. } => {}
             ClientMsg::Append { event } => {
+                // A release frees a path someone may be blocked on.
+                let freed = match &event {
+                    Event::ClaimReleased { session, path, .. } => {
+                        let held = app.held_by(&repo, session);
+                        held.into_iter().filter(|(p, _, _)| p == path).collect()
+                    }
+                    Event::SessionEnded { session, .. } => app.held_by(&repo, session),
+                    _ => Vec::new(),
+                };
+                let who = match &event {
+                    Event::ClaimReleased { session, .. } | Event::SessionEnded { session, .. } => {
+                        session.clone()
+                    }
+                    _ => String::new(),
+                };
                 app.commit(&repo, event);
+                if !freed.is_empty() {
+                    app.announce_freed(&repo, &who, freed);
+                }
             }
             ClientMsg::ReleaseSession { session } => {
-                app.commit(&repo, Event::SessionEnded { session, ts: now_ms() });
+                let freed = app.held_by(&repo, &session);
+                app.commit(&repo, Event::SessionEnded { session: session.clone(), ts: now_ms() });
+                app.announce_freed(&repo, &session, freed);
             }
             ClientMsg::ClaimReq { id, session, user, path, intent } => {
                 // Arbitration: the one decision only the relay may make.

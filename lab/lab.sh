@@ -109,6 +109,30 @@ function handler(req, res) {
 
 module.exports = { handler };
 EOF
+  cat > GOAL.md <<'EOF'
+# Shared goal
+
+Ship a working invoice endpoint. Four agents, one codebase, one objective —
+you are expected to depend on each other's files.
+
+Definition of done:
+- POST /invoice validates its session token, computes a total with tax and any
+  discount, and returns { total, currency }.
+- Unauthenticated requests get 401; malformed bodies get 400.
+- `node test.js` passes and covers auth expiry, discounts, and both error codes.
+
+Division of labour (you will still collide — that is the point):
+- user A: session handling in src/auth.js (expiry, refresh)
+- user B: money in src/billing.js (discount, tax, rounding)
+- user C: the endpoint in src/api.js (wiring, status codes)
+- user D: test.js, plus the shared types both A and B need
+
+Rules:
+- Coordinate with `coord msg <user> "text"` — say when you finish something
+  someone is waiting on.
+- `coord who` shows who holds what. If you are blocked, you will be told when
+  the file frees up.
+EOF
   cat > TASKS.md <<'EOF'
 # Suggested overlapping tasks
 
@@ -132,7 +156,7 @@ if [[ "${1:-start}" == "web" ]]; then
   [[ -f "$LAB/.coord.toml" ]] || (cd "$LAB" && "$COORD" init --relay "$RELAY_URL" >/dev/null)
   echo "starting relay with browser terminals ..."
   "$COORD" relay --listen "$RELAY_ADDR" --lab-dir "$LAB" \
-      --agents "$(IFS=,; echo "${AGENTS[*]:0:2}")" >/tmp/coord-relay.log 2>&1 &
+      --agents "$(IFS=,; echo "${AGENTS[*]}")" >/tmp/coord-relay.log 2>&1 &
   sleep 1.2
   URL="http://${RELAY_ADDR/0.0.0.0/127.0.0.1}/lab"
   echo "lab: $URL"

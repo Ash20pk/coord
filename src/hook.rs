@@ -63,9 +63,16 @@ fn inner() {
                 return;
             }
             let text: String = prompt.chars().take(160).collect();
-            DReq::Intent { repo_root, session, text }
+            DReq::Intent { repo_root, session, text, user: session_user() }
         }
         "SessionEnd" => DReq::SessionEnd { repo_root, session },
+        // The moment an agent tries to finish is the only reliable chance to
+        // hand it something that arrived while it was working.
+        "Stop" | "SubagentStop" => DReq::StopCheck {
+            repo_root,
+            user: session_user(),
+            already_continued: v["stop_hook_active"].as_bool().unwrap_or(false),
+        },
         _ => return,
     };
 
@@ -78,6 +85,34 @@ fn inner() {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
                     "permissionDecisionReason": reason.unwrap_or_default(),
+                }
+            });
+            println!("{out}");
+        }
+        ("Stop", DResp::Mail { items }) | ("SubagentStop", DResp::Mail { items }) => {
+            if items.is_empty() {
+                return;
+            }
+            // `block` sends the agent back to work with these notes, which is
+            // what makes a release notification arrive in real time rather
+            // than whenever the human next types.
+            let out = json!({
+                "decision": "block",
+                "reason": format!(
+                    "{}\n\nAct on this if it affects your task; otherwise say so briefly and stop.",
+                    items.join("\n")
+                ),
+            });
+            println!("{out}");
+        }
+        ("PostToolUse", DResp::Mail { items }) => {
+            if items.is_empty() {
+                return;
+            }
+            let out = json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": items.join("\n"),
                 }
             });
             println!("{out}");
@@ -106,7 +141,12 @@ fn inner() {
                     if held.is_empty() { String::new() } else { format!(" [working in: {}]", held.join(", ")) },
                 ));
             }
-            ctx.push_str("Avoid editing files they are working in; you will be blocked with details if you try.");
+            ctx.push_str(
+                "Avoid editing files they are working in; you will be blocked with details if you \
+                 try, and told automatically when a file you were blocked on is released.\n\
+                 To talk to a peer, run: coord msg <user> \"text\"  (or `coord msg all \"text\"`). \
+                 Tell peers when you finish something they are waiting on.",
+            );
             let out = json!({
                 "hookSpecificOutput": { "hookEventName": event, "additionalContext": ctx }
             });
