@@ -189,8 +189,18 @@ receipts wins by default.
 
 ## Sequence
 
-1. Push coordination into every turn (gap 1) — days
-2. Branch-aware claims (gap 2) — a day
+_Revised 2 September 2026 after DEMAND.md. Gaps 1, 2 and 7 are built. The
+research found no external evidence for the team thesis this whole document
+rests on, so validation now comes before any further building._
+
+1. ~~Push coordination into every turn (gap 1)~~ — done; Anthropic has since
+   shipped native cross-session messaging, so this is table stakes, not a moat
+2. ~~Branch-aware claims (gap 2)~~ — done; the one direction the market agrees
+   with (`clash`, 63★, does it for one machine's worktrees)
 3. ~~Hosted relay with token auth (gap 7)~~ — done
-4. One design-partner team, one week, read the numbers (gap 8)
-5. Then, and only then, decide between gaps 3, 4, 5 on what the log says
+4. **Five team interviews** — does a colleague's agent ever step on yours, and
+   what does it cost? See DEMAND.md. Nothing below happens until this has an
+   answer
+5. If yes: one design-partner team, one week, read the numbers (gap 8)
+6. Then, and only then, gaps 3, 4, 5 — knowing that `bernstein` (1,071★)
+   already occupies the general governance slot
