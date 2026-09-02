@@ -1,7 +1,7 @@
 use crate::proto::*;
 use anyhow::Result;
 use axum::{
-    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Query, State},
+    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Path as AxPath, Query, State},
     response::{Html, IntoResponse},
     routing::get,
     Json, Router,
@@ -21,6 +21,9 @@ struct RepoState {
 struct App {
     repos: Mutex<HashMap<String, RepoState>>,
     db: Mutex<rusqlite::Connection>,
+    /// Live agent terminals. Only present when the relay was asked to host a
+    /// lab; a plain relay spawns no processes.
+    terms: Option<Arc<crate::term::Terms>>,
 }
 
 impl App {
@@ -66,17 +69,36 @@ async fn prepare(listen: &str, db_path: PathBuf) -> Result<(tokio::net::TcpListe
         );
         CREATE INDEX IF NOT EXISTS idx_events_repo_seq ON events (repo, seq);",
     )?;
-    let app = Arc::new(App { repos: Mutex::new(HashMap::new()), db: Mutex::new(conn) });
+    let app = Arc::new(App {
+        repos: Mutex::new(HashMap::new()),
+        db: Mutex::new(conn),
+        terms: None,
+    });
     let listener = tokio::net::TcpListener::bind(listen).await?;
     Ok((listener, app))
 }
 
-pub async fn run(listen: String, db_path: PathBuf) -> Result<()> {
-    let (listener, app) = prepare(&listen, db_path.clone()).await?;
+pub struct LabOpts {
+    pub dir: PathBuf,
+    pub agents: Vec<String>,
+    pub program: String,
+}
+
+pub async fn run(listen: String, db_path: PathBuf, lab: Option<LabOpts>) -> Result<()> {
+    let (listener, mut app) = prepare(&listen, db_path.clone()).await?;
+    if let Some(l) = lab {
+        let terms = crate::term::Terms::spawn(&l.dir, &l.agents, &l.program)?;
+        eprintln!("  lab terminals: {} in {}", l.agents.join(", "), l.dir.display());
+        Arc::get_mut(&mut app).expect("sole owner before serving").terms = Some(terms);
+    }
+    let has_terms = app.terms.is_some();
     let router = routes(app);
     let shown = listen.replace("0.0.0.0", "127.0.0.1");
     eprintln!("coord relay listening on ws://{listen}/ws (audit log: {})", db_path.display());
     eprintln!("  dashboard: http://{shown}/");
+    if has_terms {
+        eprintln!("  lab:       http://{shown}/lab");
+    }
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -84,10 +106,71 @@ pub async fn run(listen: String, db_path: PathBuf) -> Result<()> {
 fn routes(app: Arc<App>) -> Router {
     Router::new()
         .route("/", get(|| async { Html(include_str!("dashboard.html")) }))
+        .route("/lab", get(|| async { Html(include_str!("lab.html")) }))
+        .route("/api/terms", get(terms_handler))
+        .route("/term/ws/:idx", get(term_ws_handler))
         .route("/api/repos", get(repos_handler))
         .route("/api/events", get(events_handler))
         .route("/ws", get(ws_handler))
         .with_state(app)
+}
+
+/// The agent terminals this relay is hosting, if any.
+async fn terms_handler(State(app): State<Arc<App>>) -> impl IntoResponse {
+    match &app.terms {
+        Some(t) => Json(serde_json::json!({ "dir": t.dir, "agents": t.names() })),
+        None => Json(serde_json::json!({ "dir": null, "agents": [] })),
+    }
+}
+
+/// Bridge a browser terminal to its pty. Binary frames carry keystrokes and
+/// output; text frames carry control messages (resize).
+async fn term_ws_handler(
+    ws: WebSocketUpgrade,
+    AxPath(idx): AxPath<usize>,
+    State(app): State<Arc<App>>,
+) -> impl IntoResponse {
+    let term = app.terms.as_ref().and_then(|t| t.get(idx));
+    ws.on_upgrade(move |sock| async move {
+        let Some(term) = term else { return };
+        let (mut tx_ws, mut rx_ws) = sock.split();
+        let (history, mut rx) = term.subscribe();
+
+        // Replay scrollback so a reload shows the session as it stands.
+        if !history.is_empty() && tx_ws.send(Message::Binary(history)).await.is_err() {
+            return;
+        }
+        let pump = tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(chunk) => {
+                        if tx_ws.send(Message::Binary(chunk)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+
+        while let Some(Ok(msg)) = rx_ws.next().await {
+            match msg {
+                Message::Binary(b) => term.write_input(&b),
+                Message::Text(t) => {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
+                        match (v["cols"].as_u64(), v["rows"].as_u64()) {
+                            (Some(c), Some(r)) => term.resize(c as u16, r as u16),
+                            _ => term.write_input(t.as_bytes()),
+                        }
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+        pump.abort();
+    })
 }
 
 /// Repos this relay has seen, live ones first.

@@ -38,7 +38,36 @@ Restart your Claude Code sessions in that repo. Then:
 coord who      # who's active, what they're doing, what they hold
 ```
 
-## The lab — see it in front of you
+## The browser lab
+
+Two live Claude Code sessions in the browser, with the coord event log beside
+them — no tmux required.
+
+```sh
+./lab/lab.sh reset     # seed the repo once
+./lab/lab.sh web       # opens http://127.0.0.1:7420/lab
+```
+
+The relay hosts each agent as a real pty running `claude` with its own
+`COORD_USER`, bridged to xterm.js over a WebSocket. Output is buffered, so a
+page reload replays the session rather than showing a blank screen. Each
+terminal's header shows what that agent currently holds, and turns red the
+moment it is blocked. The log on the right is the same event stream the CLI
+dashboard reads.
+
+Give both agents the same file to see a block:
+
+- **ash** — a long refactor of `src/auth.js` (holds the claim for minutes)
+- **priya** — ~30s later, anything touching `src/auth.js`
+
+Plain `coord relay` spawns no processes; terminals exist only when it is
+started with `--lab-dir`:
+
+```sh
+coord relay --lab-dir /path/to/repo --agents ash,priya
+```
+
+## The tmux lab
 
 ```sh
 cargo build --release

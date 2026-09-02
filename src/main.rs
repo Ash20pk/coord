@@ -22,6 +22,15 @@ enum Cmd {
         listen: String,
         #[arg(long)]
         db: Option<PathBuf>,
+        /// Host live agent terminals for this repo (the browser lab at /lab)
+        #[arg(long)]
+        lab_dir: Option<PathBuf>,
+        /// Agent identities to spawn, comma separated
+        #[arg(long, default_value = "ash,priya", value_delimiter = ',')]
+        agents: Vec<String>,
+        /// Program each terminal runs
+        #[arg(long, default_value = "claude")]
+        agent_program: String,
     },
     /// Run the local daemon (claim mirror + hot-path checks)
     Daemon,
@@ -44,9 +53,10 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Relay { listen, db } => {
+        Cmd::Relay { listen, db, lab_dir, agents, agent_program } => {
             let db = db.unwrap_or_else(|| dirs::home_dir().unwrap().join(".coord/relay.db"));
-            relay::run(listen, db).await
+            let lab = lab_dir.map(|dir| relay::LabOpts { dir, agents, program: agent_program });
+            relay::run(listen, db, lab).await
         }
         Cmd::Daemon => daemon::run().await,
         Cmd::Hook => {

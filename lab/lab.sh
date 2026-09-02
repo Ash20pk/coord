@@ -39,7 +39,12 @@ reset)
   echo "state wiped."
   ;;
 start) ;;
-*) die "usage: lab.sh [start|reset|kill]" ;;
+web)
+  # Browser-only lab: relay hosts two agent terminals, no tmux involved.
+  pkill -f "coord relay" 2>/dev/null || true
+  sleep 0.3
+  ;;
+*) die "usage: lab.sh [start|web|reset|kill]" ;;
 esac
 
 # ---------------------------------------------------------------- seed repo
@@ -118,6 +123,21 @@ Paste one into each pane. The first two collide on `src/auth.js` on purpose.
 4. ci-bot — Add input validation to the handler in src/api.js.
 EOF
   git add -A && git commit -qm "seed"
+fi
+
+# ---------------------------------------------------------------- web mode
+if [[ "${1:-start}" == "web" ]]; then
+  [[ -d "$LAB/.git" ]] || die "seed the lab first: ./lab/lab.sh reset"
+  pgrep -f "coord daemon" >/dev/null || { "$COORD" daemon >/tmp/coord-daemon.log 2>&1 & sleep 0.5; }
+  [[ -f "$LAB/.coord.toml" ]] || (cd "$LAB" && "$COORD" init --relay "$RELAY_URL" >/dev/null)
+  echo "starting relay with browser terminals ..."
+  "$COORD" relay --listen "$RELAY_ADDR" --lab-dir "$LAB" \
+      --agents "$(IFS=,; echo "${AGENTS[*]:0:2}")" >/tmp/coord-relay.log 2>&1 &
+  sleep 1.2
+  URL="http://${RELAY_ADDR/0.0.0.0/127.0.0.1}/lab"
+  echo "lab: $URL"
+  command -v open >/dev/null && open "$URL"
+  exit 0
 fi
 
 # ----------------------------------------------------------- relay + daemon

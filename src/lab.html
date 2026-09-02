@@ -1,0 +1,273 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>coord lab</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css">
+<style>
+  :root{
+    --bg:#0b0d10; --panel:#12161b; --line:#1e242c; --ink:#e6edf3; --dim:#7d8896;
+    --green:#3fb950; --red:#f85149; --amber:#d29922; --cyan:#58a6ff; --violet:#a371f7;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.5 var(--mono);
+       display:flex;flex-direction:column;overflow:hidden}
+  header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;flex:none;
+         padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .brand{font-weight:700;font-size:14px;letter-spacing:.5px}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:7px;
+       background:var(--red);transition:background .3s}
+  .dot.on{background:var(--green);box-shadow:0 0 8px var(--green)}
+  .repo{color:var(--dim);font-size:11px}
+  .stats{display:flex;gap:7px;margin-left:auto;flex-wrap:wrap}
+  .stat{background:#0d1117;border:1px solid var(--line);border-radius:7px;padding:4px 10px;
+        min-width:66px;text-align:center}
+  .stat b{display:block;font-size:15px;line-height:1.2}
+  .stat span{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px}
+  .stat.hot b{color:var(--red)} .stat.warn b{color:var(--amber)}
+  a.link{color:var(--cyan);text-decoration:none;font-size:11px}
+  a.link:hover{text-decoration:underline}
+
+  main{flex:1;display:grid;grid-template-columns:1fr 380px;min-height:0}
+  @media(max-width:1100px){main{grid-template-columns:1fr}}
+  #terms{display:grid;grid-template-rows:1fr 1fr;min-height:0;min-width:0}
+  .term{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line);
+        border-bottom:1px solid var(--line)}
+  .term-bar{flex:none;display:flex;align-items:center;gap:9px;padding:6px 12px;
+            background:var(--panel);border-bottom:1px solid var(--line)}
+  .who{font-weight:700;color:var(--cyan)}
+  .tag{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px}
+  .holding{margin-left:auto;display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}
+  .chip{background:#1c1408;border:1px solid #3d2f10;color:var(--amber);border-radius:4px;
+        padding:1px 7px;font-size:10px}
+  .chip.blocked{background:#2a1012;border-color:#5c1c20;color:var(--red)}
+  .chip.idle{background:#0d1117;border-color:var(--line);color:var(--dim)}
+  .screen{flex:1;min-height:0;padding:4px 6px;background:#0b0d10}
+  .screen .xterm{height:100%}
+
+  aside{display:flex;flex-direction:column;min-height:0;background:var(--panel)}
+  aside h2{margin:0;padding:9px 14px;font-size:10px;letter-spacing:1px;text-transform:uppercase;
+           color:var(--dim);border-bottom:1px solid var(--line);font-weight:600;
+           display:flex;align-items:center;gap:8px}
+  #feed{flex:1;overflow-y:auto;padding:5px 0;min-height:0}
+  .ev{display:flex;gap:8px;padding:3px 12px;align-items:baseline;border-left:2px solid transparent}
+  .ev time{color:var(--dim);font-size:10px;flex:none;width:52px}
+  .ev .u{color:var(--cyan);flex:none;width:58px;overflow:hidden;text-overflow:ellipsis;
+         white-space:nowrap;font-size:11px}
+  .ev .k{flex:none;width:62px;font-weight:700;font-size:10px;letter-spacing:.4px}
+  .ev .d{color:var(--ink);opacity:.78;font-size:11px;overflow-wrap:anywhere}
+  .ev.new{animation:flash .9s ease-out}
+  @keyframes flash{from{background:#1c2733}to{background:transparent}}
+  .k.claim{color:var(--green)} .k.wrote{color:var(--dim)} .k.blocked{color:var(--red)}
+  .k.ungated{color:var(--amber)} .k.joined{color:var(--violet)} .k.intent{color:var(--dim)}
+  .k.left{color:var(--dim)} .k.released{color:var(--dim)}
+  .ev.blocked{border-left-color:var(--red);background:#1a0f10}
+  .ev.ungated{border-left-color:var(--amber);background:#1a1408}
+  .empty{padding:22px 14px;color:var(--dim);text-align:center;font-style:italic;font-size:12px}
+  .hint{flex:none;padding:8px 14px;border-top:1px solid var(--line);color:var(--dim);font-size:10px}
+</style>
+
+<header>
+  <div class="brand"><span class="dot" id="dot"></span>coord lab</div>
+  <span class="repo" id="repo">…</span>
+  <a class="link" href="/">full dashboard →</a>
+  <div class="stats">
+    <div class="stat"><b id="s-claims">0</b><span>claims</span></div>
+    <div class="stat"><b id="s-writes">0</b><span>writes</span></div>
+    <div class="stat" id="w-blocked"><b id="s-blocked">0</b><span>blocked</span></div>
+    <div class="stat" id="w-ungated"><b id="s-ungated">0</b><span>ungated</span></div>
+  </div>
+</header>
+
+<main>
+  <div id="terms"></div>
+  <aside>
+    <h2>coord event log <span id="live-tag" class="tag"></span></h2>
+    <div id="feed"><div class="empty">waiting for activity…</div></div>
+    <div class="hint">Click a terminal to type. Give both the same file to see a block.</div>
+  </aside>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm-addon-fit/0.8.0/xterm-addon-fit.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const hhmm = ts => new Date(ts).toLocaleTimeString([], {hour12:false});
+const short = s => String(s).slice(0,8);
+
+let repo = null, sessions = new Map(), claims = [], agents = [];
+let stats = {writes:0, blocked:0, ungated:0};
+const blockedFlash = new Map();   // agent name -> until timestamp
+
+const THEME = {
+  background:'#0b0d10', foreground:'#e6edf3', cursor:'#58a6ff',
+  black:'#0b0d10', red:'#f85149', green:'#3fb950', yellow:'#d29922',
+  blue:'#58a6ff', magenta:'#a371f7', cyan:'#39c5cf', white:'#e6edf3',
+  brightBlack:'#7d8896', brightRed:'#ff7b72', brightGreen:'#56d364',
+  brightYellow:'#e3b341', brightBlue:'#79c0ff', brightMagenta:'#d2a8ff',
+  brightCyan:'#56d4dd', brightWhite:'#f0f6fc',
+};
+
+function mountTerm(idx, name){
+  const wrap = document.createElement('div');
+  wrap.className = 'term';
+  wrap.innerHTML = `<div class="term-bar">
+      <span class="who">${esc(name)}</span><span class="tag">claude code</span>
+      <span class="holding" id="hold-${idx}"><span class="chip idle">holding nothing</span></span>
+    </div><div class="screen" id="screen-${idx}"></div>`;
+  $('terms').appendChild(wrap);
+
+  const term = new Terminal({
+    fontFamily:'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    fontSize:12, lineHeight:1.15, cursorBlink:true, scrollback:5000,
+    theme:THEME, allowProposedApi:true,
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open($(`screen-${idx}`));
+
+  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  let ws, dead = false;
+  const open = () => {
+    ws = new WebSocket(`${proto}${location.host}/term/ws/${idx}`);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => { fitNow(); };
+    ws.onmessage = e => term.write(new Uint8Array(e.data));
+    ws.onclose = () => { if (!dead) setTimeout(open, 1500); };
+  };
+  const fitNow = () => {
+    try { fit.fit(); } catch {}
+    if (ws && ws.readyState === 1)
+      ws.send(JSON.stringify({cols: term.cols, rows: term.rows}));
+  };
+  term.onData(d => { if (ws && ws.readyState === 1) ws.send(new TextEncoder().encode(d)); });
+  new ResizeObserver(() => fitNow()).observe($(`screen-${idx}`));
+  open();
+  return {term, fitNow};
+}
+
+async function boot(){
+  const info = await fetch('/api/terms').then(r => r.json()).catch(() => ({agents:[]}));
+  agents = info.agents || [];
+  if (!agents.length){
+    $('terms').innerHTML = '<div class="empty">no terminals — start the relay with --lab-dir</div>';
+  } else {
+    $('terms').style.gridTemplateRows = `repeat(${agents.length}, 1fr)`;
+    agents.forEach((n, i) => mountTerm(i, n));
+  }
+
+  const repos = await fetch('/api/repos').then(r => r.json()).catch(() => []);
+  repo = repos[0];
+  $('repo').textContent = info.dir ? `${info.dir}` : (repo || '');
+  if (repo){ await history(); connect(); }
+}
+
+async function history(){
+  const evs = await fetch('/api/events?repo=' + encodeURIComponent(repo)).then(r => r.json()).catch(() => []);
+  for (const e of evs) apply(e, false);
+  render();
+}
+
+function connect(){
+  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  const ws = new WebSocket(proto + location.host + '/ws');
+  ws.onopen = () => {
+    $('dot').classList.add('on'); $('live-tag').textContent = 'live';
+    ws.send(JSON.stringify({type:'hello', repo, daemon:'lab-web'}));
+  };
+  ws.onmessage = m => {
+    const msg = JSON.parse(m.data);
+    if (msg.type === 'welcome'){
+      sessions = new Map((msg.sessions||[]).map(s => [s.session, s]));
+      claims = msg.claims || [];
+    } else if (msg.type === 'event'){
+      apply(msg.event, true);
+    }
+    render();
+  };
+  ws.onclose = () => {
+    $('dot').classList.remove('on'); $('live-tag').textContent = 'reconnecting';
+    setTimeout(connect, 2000);
+  };
+}
+
+function apply(e, live){
+  const t = e.type;
+  if (t === 'session_started')
+    sessions.set(e.session, {session:e.session, user:e.user, branch:e.branch, intent:'', last_seen:e.ts});
+  else if (t === 'intent_declared'){
+    const s = sessions.get(e.session); if (s){ s.intent = e.text; s.last_seen = e.ts; }
+  } else if (t === 'claim_acquired'){
+    const c = claims.find(c => c.session === e.session && c.path === e.path);
+    if (c) c.lease_until = e.lease_until;
+    else claims.push({session:e.session, user:e.user, path:e.path, lease_until:e.lease_until});
+  } else if (t === 'claim_released')
+    claims = claims.filter(c => !(c.session === e.session && c.path === e.path));
+  else if (t === 'file_written') stats.writes++;
+  else if (t === 'claim_denied'){
+    stats.blocked++;
+    if (live) blockedFlash.set(e.user, Date.now() + 8000);
+  }
+  else if (t === 'ungated_write') stats.ungated++;
+  else if (t === 'session_ended'){
+    sessions.delete(e.session);
+    claims = claims.filter(c => c.session !== e.session);
+  }
+  feed(e, live);
+}
+
+const KIND = {
+  session_started:['joined','joined'], intent_declared:['intent','intent'],
+  claim_acquired:['claim','claimed'], claim_released:['released','freed'],
+  file_written:['wrote','wrote'], claim_denied:['blocked','BLOCKED'],
+  ungated_write:['ungated','UNGATED'], session_ended:['left','left'],
+};
+
+function feed(e, live){
+  const [cls, label] = KIND[e.type] || ['intent', e.type];
+  const who = e.user || sessions.get(e.session)?.user || short(e.session);
+  let detail = '';
+  if (e.type === 'intent_declared') detail = e.text;
+  else if (e.type === 'claim_denied') detail = `${e.path} — held by ${e.holder_user}`;
+  else if (e.type === 'ungated_write') detail = `${e.path} — over ${e.holder_user}`;
+  else if (e.path) detail = e.path;
+  else if (e.type === 'session_started') detail = e.branch;
+
+  const row = document.createElement('div');
+  row.className = 'ev ' + (e.type === 'claim_denied' ? 'blocked' : e.type === 'ungated_write' ? 'ungated' : '') + (live ? ' new' : '');
+  row.innerHTML = `<time>${hhmm(e.ts || Date.now())}</time><span class="u">${esc(who)}</span>`
+    + `<span class="k ${cls}">${label}</span><span class="d">${esc(detail)}</span>`;
+  const f = $('feed');
+  if (f.querySelector('.empty')) f.innerHTML = '';
+  f.appendChild(row);
+  while (f.children.length > 400) f.removeChild(f.firstChild);
+  f.scrollTop = f.scrollHeight;
+}
+
+function render(){
+  const now = Date.now();
+  claims = claims.filter(c => c.lease_until > now);
+  $('s-claims').textContent = claims.length;
+  $('s-writes').textContent = stats.writes;
+  $('s-blocked').textContent = stats.blocked;
+  $('s-ungated').textContent = stats.ungated;
+  $('w-blocked').className = 'stat' + (stats.blocked ? ' hot' : '');
+  $('w-ungated').className = 'stat' + (stats.ungated ? ' warn' : '');
+
+  agents.forEach((name, i) => {
+    const box = $(`hold-${i}`); if (!box) return;
+    const mine = claims.filter(c => c.user === name);
+    const flash = (blockedFlash.get(name) || 0) > now;
+    let html = mine.length
+      ? mine.map(c => `<span class="chip">${esc(c.path)} ${Math.max(0, Math.round((c.lease_until-now)/60000))}m</span>`).join('')
+      : '<span class="chip idle">holding nothing</span>';
+    if (flash) html = '<span class="chip blocked">blocked</span>' + html;
+    box.innerHTML = html;
+  });
+}
+
+setInterval(render, 1000);
+boot();
+</script>
