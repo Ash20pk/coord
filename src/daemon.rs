@@ -56,6 +56,9 @@ struct Daemon {
     /// (repo_root, session). Compared afterwards to catch writes the parser
     /// could not predict.
     snapshots: Mutex<HashMap<(String, String), PendingBash>>,
+    /// When each session's previous turn began, keyed by (repo_root, session).
+    /// "What changed under you" is meaningless without a since; this is it.
+    turns: Mutex<HashMap<(String, String), Ts>>,
 }
 
 pub async fn run() -> Result<()> {
@@ -183,10 +186,15 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             let _ = rc.tx.send(ClientMsg::Append { event: ev });
             // Give the relay a beat to deliver the Welcome snapshot on fresh connections.
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let since = now_ms().saturating_sub(FIRST_TURN_LOOKBACK_MS);
+            d.turns.lock().unwrap().insert((repo_root.clone(), session.clone()), now_ms());
+            let mail = drain_mail(&rc, &user_of(&rc, &session));
             let v = rc.view.lock().unwrap();
             DResp::Peers {
                 sessions: v.sessions.values().filter(|s| s.session != session).cloned().collect(),
                 claims: v.claims.iter().filter(|c| c.session != session).cloned().collect(),
+                writes: v.writes_since(&session, since),
+                mail,
             }
         }
         DReq::Intent { repo_root, session, text, user } => {
@@ -195,13 +203,27 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             let ev = Event::IntentDeclared { session: session.clone(), text, ts: now_ms() };
             rc.view.lock().unwrap().apply(&ev);
             let _ = rc.tx.send(ClientMsg::Append { event: ev });
-            // Answer with current peers: presence injected once at SessionStart
-            // goes stale within minutes.
+            // Answer with everything the agent would otherwise have to ask
+            // for: peers now (presence injected once at SessionStart goes
+            // stale within minutes), what moved under it since its last turn,
+            // and any mail. A cheap model will not run `coord who` or read its
+            // messages; it does not have to.
+            let key = (repo_root.clone(), session.clone());
+            let now = now_ms();
+            let since = d
+                .turns
+                .lock()
+                .unwrap()
+                .insert(key, now)
+                .unwrap_or_else(|| now.saturating_sub(FIRST_TURN_LOOKBACK_MS));
+            let mail = drain_mail(&rc, &user);
             let mut v = rc.view.lock().unwrap();
             v.prune();
             DResp::Peers {
                 sessions: v.sessions.values().filter(|s| s.session != session).cloned().collect(),
                 claims: v.claims.iter().filter(|c| c.session != session).cloned().collect(),
+                writes: v.writes_since(&session, since),
+                mail,
             }
         }
         DReq::SessionEnd { repo_root, session } => {
@@ -388,6 +410,10 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             DResp::Peers {
                 sessions: v.sessions.values().cloned().collect(),
                 claims: v.claims.clone(),
+                // `who` is the explicit ask; it must not consume mail that the
+                // next turn is going to be handed anyway.
+                writes: v.writes_since("", now_ms().saturating_sub(FIRST_TURN_LOOKBACK_MS)),
+                mail: Vec::new(),
             }
         }
     }

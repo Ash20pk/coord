@@ -17,6 +17,14 @@ pub const LEASE_MS: u64 = 10 * 60 * 1000; // 10 min, renewed on activity
 /// by leases, not by this.
 pub const SESSION_STALE_MS: u64 = 12 * 60 * 60 * 1000;
 
+/// How far back peer writes stay worth telling an agent about. Long enough to
+/// cover a slow turn, short enough that "changed under you" means recently.
+pub const WRITE_WINDOW_MS: u64 = 30 * 60 * 1000;
+
+/// A turn with no recorded predecessor looks back this far, so a session that
+/// has just joined still learns what has been happening.
+pub const FIRST_TURN_LOOKBACK_MS: u64 = 10 * 60 * 1000;
+
 /// Everything that happens is an event on the per-repo sequenced log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -98,6 +106,17 @@ pub struct Claim {
     pub intent: String,
 }
 
+/// A write by some session, kept just long enough to tell a peer that the
+/// ground moved under it. `last_write` cannot serve this: it keeps one entry
+/// per path and names a session, not a user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerWrite {
+    pub session: String,
+    pub user: String,
+    pub path: String,
+    pub ts: Ts,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Waiter {
     pub session: String,
@@ -134,6 +153,10 @@ pub struct View {
     /// authorship — the tree is shared — so it consults this instead of
     /// assuming every change inside its window was its own.
     pub last_write: HashMap<String, (String, Ts)>,
+    /// Recent writes, newest last, within `WRITE_WINDOW_MS`. Feeds the
+    /// "changed under you since your last turn" context an agent receives
+    /// without asking for it.
+    pub recent_writes: Vec<PeerWrite>,
 }
 
 impl View {
@@ -154,6 +177,23 @@ impl View {
             self.claims.retain(|c| c.session != k);
             self.waiters.retain(|w| w.session != k);
         }
+        self.recent_writes.retain(|w| now.saturating_sub(w.ts) <= WRITE_WINDOW_MS);
+    }
+
+    /// Peer writes since `since`, newest first, one entry per (user, path):
+    /// an agent needs to know the ground moved, not how many times.
+    pub fn writes_since(&self, session: &str, since: Ts) -> Vec<PeerWrite> {
+        let mut out: Vec<PeerWrite> = Vec::new();
+        for w in self.recent_writes.iter().rev() {
+            if w.session == session || w.ts < since {
+                continue;
+            }
+            if out.iter().any(|o| o.user == w.user && o.path == w.path) {
+                continue;
+            }
+            out.push(w.clone());
+        }
+        out
     }
 
     /// True if a session other than `session` wrote `path` at or after `since`.
@@ -225,8 +265,21 @@ impl View {
             Event::ClaimReleased { session, path, .. } => {
                 self.claims.retain(|c| !(c.session == *session && c.path == *path));
             }
-            Event::FileWritten { session, path, ts, .. } => {
+            Event::FileWritten { session, user, path, ts } => {
                 self.last_write.insert(path.clone(), (session.clone(), *ts));
+                // Authorship comes off the event now, so a peer can be told
+                // who moved the file without a join back through presence.
+                let user = if user.is_empty() {
+                    self.sessions.get(session).map(|s| s.user.clone()).unwrap_or_default()
+                } else {
+                    user.clone()
+                };
+                self.recent_writes.push(PeerWrite {
+                    session: session.clone(),
+                    user,
+                    path: path.clone(),
+                    ts: *ts,
+                });
                 // Writing renews the covering lease.
                 for c in self.claims.iter_mut() {
                     if c.session == *session && paths_overlap(&c.path, path) {
@@ -296,7 +349,17 @@ pub enum DReq {
 pub enum DResp {
     Decision { allow: bool, reason: Option<String> },
     Mail { items: Vec<String> },
-    Peers { sessions: Vec<SessionInfo>, claims: Vec<Claim> },
+    /// Everything an agent should know at the start of a turn without having
+    /// run a command for it. `default` on the pushed fields so a running
+    /// daemon from an older build still answers something usable.
+    Peers {
+        sessions: Vec<SessionInfo>,
+        claims: Vec<Claim>,
+        #[serde(default)]
+        writes: Vec<PeerWrite>,
+        #[serde(default)]
+        mail: Vec<String>,
+    },
     Ok,
     Err { msg: String },
 }
@@ -489,6 +552,90 @@ mod tests {
         assert!(v.sessions.is_empty());
         assert_eq!(v.claims.len(), 1);
         assert_eq!(v.claims[0].session, "s2");
+    }
+
+    // ---------- pushed context: writes_since ----------
+
+    fn wrote(session: &str, user: &str, path: &str, ts: Ts) -> Event {
+        Event::FileWritten {
+            session: session.into(),
+            user: user.into(),
+            path: path.into(),
+            ts,
+        }
+    }
+
+    #[test]
+    fn writes_since_excludes_our_own_and_names_the_author() {
+        let mut v = View::default();
+        let t0 = now_ms();
+        v.apply(&wrote("mine", "ash", "src/auth.js", t0));
+        v.apply(&wrote("theirs", "priya", "src/billing.js", t0 + 1));
+
+        let out = v.writes_since("mine", t0);
+        assert_eq!(out.len(), 1, "our own writes are not news to us");
+        assert_eq!(out[0].user, "priya");
+        assert_eq!(out[0].path, "src/billing.js");
+    }
+
+    #[test]
+    fn writes_since_ignores_anything_before_the_bookmark() {
+        let mut v = View::default();
+        let t0 = now_ms();
+        v.apply(&wrote("theirs", "priya", "src/old.js", t0));
+        v.apply(&wrote("theirs", "priya", "src/new.js", t0 + 100));
+
+        let out = v.writes_since("mine", t0 + 50);
+        assert_eq!(out.len(), 1, "only what happened since the last turn");
+        assert_eq!(out[0].path, "src/new.js");
+    }
+
+    /// Ten edits to one file are one fact: the file moved.
+    #[test]
+    fn repeated_writes_to_one_path_collapse_to_the_latest() {
+        let mut v = View::default();
+        let t0 = now_ms();
+        for i in 0..10 {
+            v.apply(&wrote("theirs", "priya", "src/billing.js", t0 + i));
+        }
+        let out = v.writes_since("mine", t0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].ts, t0 + 9, "the newest one survives");
+    }
+
+    #[test]
+    fn two_peers_on_one_path_are_both_reported() {
+        let mut v = View::default();
+        let t0 = now_ms();
+        v.apply(&wrote("s1", "priya", "src/billing.js", t0));
+        v.apply(&wrote("s2", "sam", "src/billing.js", t0 + 1));
+
+        assert_eq!(v.writes_since("mine", t0).len(), 2);
+    }
+
+    #[test]
+    fn the_write_window_is_pruned() {
+        let mut v = View::default();
+        let old = now_ms() - WRITE_WINDOW_MS - 1;
+        v.apply(&wrote("theirs", "priya", "src/billing.js", old));
+        assert!(v.recent_writes.is_empty(), "stale writes must not accumulate");
+    }
+
+    /// Pre-`user` rows still name an author when presence can supply one.
+    #[test]
+    fn a_user_less_write_falls_back_to_presence() {
+        let mut v = View::default();
+        let t0 = now_ms();
+        v.apply(&Event::SessionStarted {
+            session: "theirs".into(),
+            user: "priya".into(),
+            branch: "main".into(),
+            ts: t0,
+        });
+        v.apply(&wrote("theirs", "", "src/billing.js", t0 + 1));
+
+        let out = v.writes_since("mine", t0);
+        assert_eq!(out[0].user, "priya");
     }
 
     // ---------- file_written attribution ----------

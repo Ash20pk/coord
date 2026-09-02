@@ -250,10 +250,9 @@ fn who() -> Result<()> {
     let req = DReq::Who { repo_root: root.to_string_lossy().to_string() };
     let resp = hook::call_daemon(&req).context("coordd not running — start it with `coord daemon`")?;
     match resp {
-        DResp::Peers { sessions, claims } => {
+        DResp::Peers { sessions, claims, writes, .. } => {
             if sessions.is_empty() {
                 println!("no active sessions on this repo");
-                return Ok(());
             }
             for s in sessions {
                 let ago = (now_ms().saturating_sub(s.last_seen)) / 1000;
@@ -262,6 +261,13 @@ fn who() -> Result<()> {
                 for c in claims.iter().filter(|c| c.session == s.session) {
                     let mins = c.lease_until.saturating_sub(now_ms()) / 60_000;
                     println!("             └─ {} (lease {}m)", c.path, mins);
+                }
+            }
+            if !writes.is_empty() {
+                println!("\nrecently written:");
+                for w in writes {
+                    let ago = (now_ms().saturating_sub(w.ts)) / 1000;
+                    println!("{:<12} {:<50} {}s ago", w.user, w.path, ago);
                 }
             }
             Ok(())

@@ -148,6 +148,103 @@ async fn session_start_injects_peer_presence_context() {
     assert!(ctx.contains("src/auth.ts"), "context must list held paths: {ctx}");
 }
 
+/// Gap 1: a peer's write must reach the next turn on its own. A cheap model
+/// will not run `coord who`, so anything it needs to coordinate cannot sit
+/// behind a command it has to think of.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_is_told_what_changed_under_it() {
+    let (sock, root) = scenario("pushwrites").await;
+    let rs = root.to_string_lossy().to_string();
+
+    for (s, u) in [("sessA", "ash"), ("sessB", "priya")] {
+        hook_as(&sock, json!({ "hook_event_name": "SessionStart", "session_id": s, "cwd": rs }), Some(u));
+    }
+    // A takes its first turn, which sets the bookmark the next one measures from.
+    hook_as(&sock, json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": "sessA",
+        "cwd": rs, "prompt": "read the billing module"
+    }), Some("ash"));
+
+    // priya writes a file while ash is mid-task.
+    hook_as(&sock, edit(&root, "sessB", "src/billing.ts", "PreToolUse"), Some("priya"));
+    hook_as(&sock, edit(&root, "sessB", "src/billing.ts", "PostToolUse"), Some("priya"));
+
+    let out = hook_as(&sock, json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": "sessA",
+        "cwd": rs, "prompt": "now compute the total"
+    }), Some("ash"))
+    .expect("the next turn must be told the ground moved");
+
+    let ctx = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap().to_string();
+    assert!(ctx.contains("changed under you"), "must flag the change: {ctx}");
+    assert!(ctx.contains("priya"), "must name the author: {ctx}");
+    assert!(ctx.contains("src/billing.ts"), "must name the path: {ctx}");
+    assert!(ctx.contains("stale"), "must say why it matters: {ctx}");
+}
+
+/// The same write must not be re-reported every turn: a bookmark advances.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_change_is_reported_once_not_every_turn() {
+    let (sock, root) = scenario("pushonce").await;
+    let rs = root.to_string_lossy().to_string();
+
+    for (s, u) in [("sessA", "ash"), ("sessB", "priya")] {
+        hook_as(&sock, json!({ "hook_event_name": "SessionStart", "session_id": s, "cwd": rs }), Some(u));
+    }
+    hook_as(&sock, json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": "sessA", "cwd": rs, "prompt": "first"
+    }), Some("ash"));
+    hook_as(&sock, edit(&root, "sessB", "src/billing.ts", "PreToolUse"), Some("priya"));
+    hook_as(&sock, edit(&root, "sessB", "src/billing.ts", "PostToolUse"), Some("priya"));
+
+    let second = hook_as(&sock, json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": "sessA", "cwd": rs, "prompt": "second"
+    }), Some("ash")).expect("the change lands on this turn");
+    assert!(second["hookSpecificOutput"]["additionalContext"]
+        .as_str().unwrap().contains("changed under you"));
+
+    let third = hook_as(&sock, json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": "sessA", "cwd": rs, "prompt": "third"
+    }), Some("ash"));
+    let ctx = third
+        .as_ref()
+        .and_then(|v| v["hookSpecificOutput"]["additionalContext"].as_str())
+        .unwrap_or("");
+    assert!(
+        !ctx.contains("changed under you"),
+        "a write already reported must not repeat: {ctx}"
+    );
+}
+
+/// Mail used to wait for the Stop hook. It should be in front of the agent at
+/// the start of the turn instead, when it can still change the plan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn messages_arrive_at_the_start_of_a_turn() {
+    let (sock, root) = scenario("pushmail").await;
+    let rs = root.to_string_lossy().to_string();
+
+    for (s, u) in [("sessA", "ash"), ("sessB", "priya")] {
+        hook_as(&sock, json!({ "hook_event_name": "SessionStart", "session_id": s, "cwd": rs }), Some(u));
+    }
+    let mut cmd = Command::new(BIN);
+    cmd.args(["msg", "ash", "discount() returns a number, not an array"])
+        .current_dir(&root)
+        .env("COORD_SOCK", &sock)
+        .env("COORD_USER", "priya")
+        .env("USER", "testuser");
+    assert!(cmd.status().unwrap().success(), "coord msg must succeed");
+
+    let out = hook_as(&sock, json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": "sessA",
+        "cwd": rs, "prompt": "wire up the endpoint"
+    }), Some("ash"))
+    .expect("a waiting message must reach the turn that starts after it");
+
+    let ctx = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap().to_string();
+    assert!(ctx.contains("messages for you"), "must be labelled as mail: {ctx}");
+    assert!(ctx.contains("returns a number"), "must carry the text: {ctx}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn first_session_gets_no_presence_noise() {
     let (sock, root) = scenario("solo").await;

@@ -20,6 +20,11 @@ RELAY_ADDR="${COORD_RELAY_ADDR:-127.0.0.1:7420}"
 RELAY_URL="ws://${RELAY_ADDR}/ws"
 DB="$HOME/.coord/relay.db"
 MODEL="${COORD_LAB_MODEL:-haiku}"
+# Pushed context lands at the *start of a turn*, so a one-shot `claude -p` can
+# never see it: its single UserPromptSubmit fires before any peer has written
+# anything. Several turns per agent is the only setup where the mechanism is
+# observable at all.
+TURNS="${COORD_LAB_TURNS:-3}"
 OUT="${COORD_LAB_OUT:-/tmp/coord-haiku}"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -37,6 +42,29 @@ prompt_for() {
   esac
 }
 AGENTS=(ash priya sam ci-bot)
+
+# One agent, several turns. Turn 1 opens the session and reports its id; the
+# rest resume it, so each later turn begins with a UserPromptSubmit — which is
+# where coord hands the agent its peers, what moved under it, and its mail.
+# The continuation prompt says nothing about coordinating: if an agent reacts
+# to a peer, the pushed context is the only place it could have learned.
+run_agent() {
+  local name="$1" task="$2" first sid t
+  first=$(COORD_USER="$name" claude -p "$task" \
+            --model "$MODEL" --permission-mode acceptEdits \
+            --output-format json 2>/dev/null || true)
+  sid=$(printf '%s' "$first" | python3 -c \
+        'import json,sys;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null || true)
+  printf '%s' "$first" | python3 -c \
+        'import json,sys;print(json.load(sys.stdin).get("result",""))' 2>/dev/null || true
+  [[ -n "$sid" ]] || { echo "[$name] no session id; single turn only"; return 0; }
+  for (( t = 2; t <= TURNS; t++ )); do
+    echo "--- turn $t ---"
+    COORD_USER="$name" claude -p --resume "$sid" \
+      "Continue. When your part of the definition of done holds, verify it and stop." \
+      --model "$MODEL" --permission-mode acceptEdits 2>/dev/null || true
+  done
+}
 
 report() {
   coord_metrics "$DB" "$(sqlite3 "$DB" "select repo from events group by repo order by max(ts) desc limit 1")"
@@ -70,7 +98,7 @@ pgrep -f "coord daemon" >/dev/null || { "$COORD" daemon >/tmp/coord-daemon.log 2
 [[ -f "$LAB/.coord.toml" ]] || (cd "$LAB" && "$COORD" init --relay "$RELAY_URL" >/dev/null)
 
 mkdir -p "$OUT"
-echo "running ${#AGENTS[@]} $MODEL agents headless in $LAB ..."
+echo "running ${#AGENTS[@]} $MODEL agents headless in $LAB, $TURNS turns each ..."
 pids=()
 for name in "${AGENTS[@]}"; do
   read -r -d '' task <<EOF || true
@@ -83,9 +111,7 @@ Before you write, run \`coord who\` to see who holds what, and use
 finished something someone else is waiting on. Stay inside the file you own.
 Work until your part of the definition of done in GOAL.md holds.
 EOF
-  ( cd "$LAB" && COORD_USER="$name" claude -p "$task" \
-        --model "$MODEL" --permission-mode acceptEdits \
-        >"$OUT/$name.log" 2>&1 ) &
+  ( cd "$LAB" && run_agent "$name" "$task" >"$OUT/$name.log" 2>&1 ) &
   pids+=($!)
   echo "  started $name (pid ${pids[${#pids[@]}-1]}) -> $OUT/$name.log"
 done

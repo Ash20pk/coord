@@ -117,36 +117,78 @@ fn inner() {
             });
             println!("{out}");
         }
-        ("SessionStart", DResp::Peers { sessions, claims })
-        | ("UserPromptSubmit", DResp::Peers { sessions, claims }) => {
-            if sessions.is_empty() {
-                return;
+        ("SessionStart", DResp::Peers { sessions, claims, writes, mail })
+        | ("UserPromptSubmit", DResp::Peers { sessions, claims, writes, mail }) => {
+            // Everything here arrives unasked. A capable model will run
+            // `coord who` and read its messages; a cheap one demonstrably
+            // will not, even when told to — so nothing an agent needs to
+            // coordinate may sit behind a command it has to think of.
+            let mut ctx = String::new();
+
+            // Mail first: it is the only part addressed to this agent.
+            if !mail.is_empty() {
+                ctx.push_str("coord: messages for you\n");
+                for m in &mail {
+                    ctx.push_str(&format!("- {m}\n"));
+                }
+                ctx.push('\n');
             }
-            let mut ctx = format!(
-                "coord: {} other active session(s) on this repo right now:\n",
-                sessions.len()
-            );
-            for s in &sessions {
-                let intent = if s.intent.is_empty() { "(no stated intent yet)".into() } else { format!("\"{}\"", s.intent) };
-                let held: Vec<&str> = claims
-                    .iter()
-                    .filter(|c| c.session == s.session)
-                    .map(|c| c.path.as_str())
-                    .collect();
+
+            if !writes.is_empty() {
+                ctx.push_str("coord: changed under you since your last turn\n");
+                for w in &writes {
+                    ctx.push_str(&format!("- {} wrote {}\n", w.user, w.path));
+                }
+                ctx.push_str(
+                    "Re-read any of these you had already read; your notes on them may be stale.\n\n",
+                );
+            }
+
+            if !sessions.is_empty() {
                 ctx.push_str(&format!(
-                    "- {} on branch {} — {}{}\n",
-                    s.user,
-                    s.branch,
-                    intent,
-                    if held.is_empty() { String::new() } else { format!(" [working in: {}]", held.join(", ")) },
+                    "coord: {} other active session(s) on this repo right now:\n",
+                    sessions.len()
                 ));
+                for s in &sessions {
+                    let intent = if s.intent.is_empty() {
+                        "(no stated intent yet)".into()
+                    } else {
+                        format!("\"{}\"", s.intent)
+                    };
+                    let held: Vec<&str> = claims
+                        .iter()
+                        .filter(|c| c.session == s.session)
+                        .map(|c| c.path.as_str())
+                        .collect();
+                    ctx.push_str(&format!(
+                        "- {} on branch {} — {}{}\n",
+                        s.user,
+                        s.branch,
+                        intent,
+                        if held.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" [working in: {}]", held.join(", "))
+                        },
+                    ));
+                }
+                ctx.push_str(
+                    "Avoid editing files they are working in; you will be blocked with details if \
+                     you try, and told automatically when a file you were blocked on is released.\n",
+                );
             }
+
+            if ctx.is_empty() {
+                return; // nothing to say; do not spend the agent's attention
+            }
+
+            // The one thing that still needs asking for. Kept last and kept
+            // short: the rest of this context arrived on its own.
             ctx.push_str(
-                "Avoid editing files they are working in; you will be blocked with details if you \
-                 try, and told automatically when a file you were blocked on is released.\n\
-                 To talk to a peer, run: coord msg <user> \"text\"  (or `coord msg all \"text\"`). \
-                 Tell peers when you finish something they are waiting on.",
+                "To reply or to tell peers you have finished something they are waiting on: \
+                 coord msg <user|all> \"text\"",
             );
+
             let out = json!({
                 "hookSpecificOutput": { "hookEventName": event, "additionalContext": ctx }
             });
