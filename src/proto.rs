@@ -30,8 +30,24 @@ pub const FIRST_TURN_LOOKBACK_MS: u64 = 10 * 60 * 1000;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     SessionStarted { session: String, user: String, branch: String, ts: Ts },
-    IntentDeclared { session: String, text: String, ts: Ts },
-    ClaimAcquired { session: String, user: String, path: String, lease_until: Ts, intent: String },
+    IntentDeclared {
+        session: String,
+        text: String,
+        ts: Ts,
+        /// Re-sent every turn: a session that checked out a new branch would
+        /// otherwise keep claiming under the branch it started on.
+        #[serde(default)]
+        branch: String,
+    },
+    ClaimAcquired {
+        session: String,
+        user: String,
+        path: String,
+        lease_until: Ts,
+        intent: String,
+        #[serde(default)]
+        branch: String,
+    },
     ClaimReleased { session: String, path: String, ts: Ts },
     /// A write that landed on someone else's claim without being stopped —
     /// detected after the fact by diffing the working tree. Distinct from
@@ -42,6 +58,18 @@ pub enum Event {
         path: String,
         holder: String,
         holder_user: String,
+        ts: Ts,
+    },
+    /// Two branches editing one file. Nothing is blocked — they are not in
+    /// each other's way yet — but this is a merge conflict being born, and
+    /// saying so now costs one re-plan instead of an afternoon later.
+    CrossBranchOverlap {
+        session: String,
+        user: String,
+        branch: String,
+        path: String,
+        peer_user: String,
+        peer_branch: String,
         ts: Ts,
     },
     /// A path a peer was waiting on has been freed.
@@ -78,7 +106,7 @@ pub enum Event {
 pub enum ClientMsg {
     Hello { repo: String, daemon: String },
     Append { event: Event },
-    ClaimReq { id: String, session: String, user: String, path: String, intent: String },
+    ClaimReq { id: String, session: String, user: String, path: String, intent: String, #[serde(default)] branch: String },
     ReleaseSession { session: String },
 }
 
@@ -104,6 +132,11 @@ pub struct Claim {
     pub path: String,
     pub lease_until: Ts,
     pub intent: String,
+    /// The branch the holder is on. Two agents in one file on *different*
+    /// branches are not colliding yet — git will merge them, or fail to — so
+    /// this is what separates a block from a warning.
+    #[serde(default)]
+    pub branch: String,
 }
 
 /// A write by some session, kept just long enough to tell a peer that the
@@ -135,6 +168,13 @@ pub struct SessionInfo {
 }
 
 /// Two claim paths conflict if equal, or one is a directory prefix of the other.
+/// Whether two branch labels should be treated as the same branch. An unknown
+/// branch on either side compares equal: coord would rather block a write it
+/// could have allowed than allow one it should have blocked.
+pub fn same_branch(a: &str, b: &str) -> bool {
+    a.is_empty() || b.is_empty() || a == b
+}
+
 pub fn paths_overlap(a: &str, b: &str) -> bool {
     a == b
         || a.strip_prefix(b).map_or(false, |r| r.starts_with('/'))
@@ -212,12 +252,42 @@ impl View {
             .collect()
     }
 
-    /// First live claim held by a *different* session that overlaps `path`.
+    /// First live claim held by a *different* session that overlaps `path`
+    /// **on the same branch**. Only same-branch overlap is a collision: the
+    /// two agents are writing the same lines of the same working tree.
+    ///
+    /// A claim with no recorded branch (an older client, or a session that
+    /// registered before branches travelled with claims) is treated as
+    /// same-branch — blocking on too little information is the safe error.
     pub fn conflicting(&self, session: &str, path: &str) -> Option<&Claim> {
+        self.conflicting_on(session, path, "")
+    }
+
+    /// As `conflicting`, for a writer known to be on `branch`.
+    pub fn conflicting_on(&self, session: &str, path: &str, branch: &str) -> Option<&Claim> {
+        let now = now_ms();
+        self.claims.iter().find(|c| {
+            c.session != session
+                && c.lease_until > now
+                && paths_overlap(&c.path, path)
+                && same_branch(&c.branch, branch)
+        })
+    }
+
+    /// Live claims on `path` held from a *different* branch. These do not
+    /// block; they are a merge conflict that has not happened yet.
+    pub fn cross_branch_overlap(&self, session: &str, path: &str, branch: &str) -> Vec<Claim> {
         let now = now_ms();
         self.claims
             .iter()
-            .find(|c| c.session != session && c.lease_until > now && paths_overlap(&c.path, path))
+            .filter(|c| {
+                c.session != session
+                    && c.lease_until > now
+                    && paths_overlap(&c.path, path)
+                    && !same_branch(&c.branch, branch)
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn apply(&mut self, ev: &Event) {
@@ -234,13 +304,16 @@ impl View {
                     },
                 );
             }
-            Event::IntentDeclared { session, text, ts } => {
+            Event::IntentDeclared { session, text, ts, branch } => {
                 if let Some(s) = self.sessions.get_mut(session) {
                     s.intent = text.clone();
                     s.last_seen = *ts;
+                    if !branch.is_empty() {
+                        s.branch = branch.clone();
+                    }
                 }
             }
-            Event::ClaimAcquired { session, user, path, lease_until, intent } => {
+            Event::ClaimAcquired { session, user, path, lease_until, intent, branch } => {
                 if let Some(s) = self.sessions.get_mut(session) {
                     s.last_seen = now_ms();
                 }
@@ -259,6 +332,13 @@ impl View {
                         path: path.clone(),
                         lease_until: *lease_until,
                         intent: intent.clone(),
+                        // Fall back to the session's branch: a claim minted by
+                        // an older client still lands on the right branch.
+                        branch: if branch.is_empty() {
+                            self.sessions.get(session).map(|s| s.branch.clone()).unwrap_or_default()
+                        } else {
+                            branch.clone()
+                        },
                     });
                 }
             }
@@ -310,6 +390,7 @@ impl View {
             }
             Event::Message { .. } => {}
             Event::UngatedWrite { .. } => {} // observability only
+            Event::CrossBranchOverlap { .. } => {} // a warning, not state
             Event::SessionEnded { session, .. } => {
                 self.claims.retain(|c| c.session != *session);
                 self.sessions.remove(session);
@@ -326,7 +407,7 @@ pub enum DReq {
     PreWrite { repo_root: String, session: String, path: String },
     PostWrite { repo_root: String, session: String, path: String },
     SessionStart { repo_root: String, session: String, user: String, branch: String },
-    Intent { repo_root: String, session: String, text: String, user: String },
+    Intent { repo_root: String, session: String, text: String, user: String, #[serde(default)] branch: String },
     SessionEnd { repo_root: String, session: String },
     /// Send a message to a peer user, or to everyone when `to` is None.
     /// Identity travels with the request: Claude Code exposes no session id to
@@ -374,7 +455,7 @@ mod tests {
             user: "u".into(),
             path: path.into(),
             lease_until,
-            intent: "i".into(),
+            intent: "i".into(), branch: String::new(),
         }
     }
 
@@ -470,6 +551,7 @@ mod tests {
             session: "s1".into(),
             text: "refactor auth".into(),
             ts: now_ms(),
+            branch: String::new(),
         });
         assert_eq!(v.sessions["s1"].intent, "refactor auth");
         assert_eq!(v.sessions["s1"].branch, "main");
@@ -478,7 +560,7 @@ mod tests {
     #[test]
     fn intent_for_unknown_session_is_ignored() {
         let mut v = View::default();
-        v.apply(&Event::IntentDeclared { session: "ghost".into(), text: "x".into(), ts: now_ms() });
+        v.apply(&Event::IntentDeclared { session: "ghost".into(), text: "x".into(), ts: now_ms() , branch: String::new()});
         assert!(v.sessions.is_empty());
     }
 
@@ -494,6 +576,7 @@ mod tests {
                 path: "src/auth.ts".into(),
                 lease_until,
                 intent: "i".into(),
+                branch: String::new(),
             });
         }
         assert_eq!(v.claims.len(), 1, "same session+path must renew, not duplicate");
@@ -552,6 +635,116 @@ mod tests {
         assert!(v.sessions.is_empty());
         assert_eq!(v.claims.len(), 1);
         assert_eq!(v.claims[0].session, "s2");
+    }
+
+    // ---------- branch-aware claims ----------
+
+    fn claim_on(session: &str, path: &str, branch: &str) -> Claim {
+        Claim {
+            session: session.into(),
+            user: "u".into(),
+            path: path.into(),
+            lease_until: now_ms() + LEASE_MS,
+            intent: "i".into(),
+            branch: branch.into(),
+        }
+    }
+
+    #[test]
+    fn one_branch_one_file_is_a_collision() {
+        let mut v = View::default();
+        v.claims.push(claim_on("theirs", "lib/response.js", "main"));
+        assert!(v.conflicting_on("mine", "lib/response.js", "main").is_some());
+        assert!(v.cross_branch_overlap("mine", "lib/response.js", "main").is_empty());
+    }
+
+    #[test]
+    fn two_branches_one_file_is_a_warning_not_a_collision() {
+        let mut v = View::default();
+        v.claims.push(claim_on("theirs", "lib/response.js", "main"));
+
+        assert!(
+            v.conflicting_on("mine", "lib/response.js", "feat/discounts").is_none(),
+            "different branches must not block"
+        );
+        let warn = v.cross_branch_overlap("mine", "lib/response.js", "feat/discounts");
+        assert_eq!(warn.len(), 1, "but it must still be reported");
+        assert_eq!(warn[0].branch, "main");
+    }
+
+    /// Blocking on too little information is the safe error, so an unknown
+    /// branch on either side compares equal.
+    #[test]
+    fn an_unknown_branch_blocks_rather_than_slipping_through() {
+        let mut v = View::default();
+        v.claims.push(claim_on("theirs", "lib/response.js", ""));
+        assert!(v.conflicting_on("mine", "lib/response.js", "feat/x").is_some());
+
+        let mut v2 = View::default();
+        v2.claims.push(claim_on("theirs", "lib/response.js", "main"));
+        assert!(v2.conflicting_on("mine", "lib/response.js", "").is_some());
+    }
+
+    #[test]
+    fn a_claim_inherits_the_branch_of_its_session() {
+        let mut v = View::default();
+        let t0 = now_ms();
+        v.apply(&Event::SessionStarted {
+            session: "s1".into(),
+            user: "ash".into(),
+            branch: "feat/discounts".into(),
+            ts: t0,
+        });
+        // An older client sends no branch on the claim itself.
+        v.apply(&Event::ClaimAcquired {
+            session: "s1".into(),
+            user: "ash".into(),
+            path: "lib/response.js".into(),
+            lease_until: t0 + LEASE_MS,
+            intent: "i".into(),
+            branch: String::new(),
+        });
+        assert_eq!(v.claims[0].branch, "feat/discounts");
+    }
+
+    /// A session that checks out a different branch mid-run must claim under
+    /// the new one; the branch travels with every turn for this reason.
+    #[test]
+    fn checking_out_a_branch_updates_presence() {
+        let mut v = View::default();
+        let t0 = now_ms();
+        v.apply(&Event::SessionStarted {
+            session: "s1".into(),
+            user: "ash".into(),
+            branch: "main".into(),
+            ts: t0,
+        });
+        v.apply(&Event::IntentDeclared {
+            session: "s1".into(),
+            text: "add discounts".into(),
+            ts: t0 + 1,
+            branch: "feat/discounts".into(),
+        });
+        assert_eq!(v.sessions["s1"].branch, "feat/discounts");
+    }
+
+    #[test]
+    fn an_empty_branch_on_intent_does_not_erase_a_known_one() {
+        let mut v = View::default();
+        let t0 = now_ms();
+        v.apply(&Event::SessionStarted {
+            session: "s1".into(),
+            user: "ash".into(),
+            branch: "main".into(),
+            ts: t0,
+        });
+        v.apply(&Event::IntentDeclared {
+            session: "s1".into(),
+            text: "x".into(),
+            ts: t0 + 1,
+            branch: String::new(),
+        });
+        assert_eq!(v.sessions["s1"].branch, "main", "silence is not a branch change");
     }
 
     // ---------- pushed context: writes_since ----------
@@ -707,10 +900,10 @@ mod tests {
         let t0 = now_ms(); // must be recent: stale sessions are pruned
         let log = vec![
             Event::SessionStarted { session: "s1".into(), user: "a".into(), branch: "m".into(), ts: t0 },
-            Event::IntentDeclared { session: "s1".into(), text: "auth".into(), ts: t0 + 1 },
+            Event::IntentDeclared { session: "s1".into(), text: "auth".into(), ts: t0 + 1 , branch: String::new()},
             Event::ClaimAcquired {
                 session: "s1".into(), user: "a".into(), path: "src/auth.ts".into(),
-                lease_until: now_ms() + LEASE_MS, intent: "auth".into(),
+                lease_until: now_ms() + LEASE_MS, intent: "auth".into(), branch: String::new(),
             },
             Event::SessionStarted { session: "s2".into(), user: "b".into(), branch: "m".into(), ts: t0 + 2 },
             Event::FileWritten { session: "s1".into(), user: "u".into(), path: "src/auth.ts".into(), ts: now_ms() },

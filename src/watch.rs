@@ -110,7 +110,7 @@ fn describe(e: &Event) -> Option<String> {
         Event::SessionStarted { user, branch, ts, .. } => {
             format!("{DIM}{}{R}  {CYAN}{:<9}{R} joined  {DIM}branch {}{R}", clock(*ts), user, branch)
         }
-        Event::IntentDeclared { text, ts, session } => format!(
+        Event::IntentDeclared { text, ts, session, .. } => format!(
             "{DIM}{}{R}  {CYAN}{:<9}{R} intent  {}",
             clock(*ts),
             short(session),
@@ -154,6 +154,17 @@ fn describe(e: &Event) -> Option<String> {
             } else {
                 format!("{DIM}{}{R}  {CYAN}{:<9}{R} {DIM}wrote   {}{R}", clock(*ts), user, path)
             }
+        }
+        Event::CrossBranchOverlap { user, branch, path, peer_user, peer_branch, ts, .. } => {
+            format!(
+                "{DIM}{}{R}  {CYAN}{:<9}{R} {YELLOW}MERGE?{R} {} {DIM}({} on {}, you on {}){R}",
+                clock(*ts),
+                user,
+                path,
+                peer_user,
+                peer_branch,
+                branch
+            )
         }
         Event::SessionEnded { ts, .. } => format!("{DIM}{}  session ended{R}", clock(*ts)),
         Event::ClaimReleased { path, ts, .. } => {

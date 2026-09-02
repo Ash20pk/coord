@@ -109,6 +109,7 @@ async fn expired_lease_unblocks_a_peer_without_any_release() {
         path: "src/auth.ts".into(),
         lease_until: now_ms() + 40, // about to expire
         intent: "died mid-turn".into(),
+        branch: String::new(),
     });
     assert!(v.conflicting("peer", "src/auth.ts").is_some(), "blocked while lease is live");
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;

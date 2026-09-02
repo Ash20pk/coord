@@ -63,7 +63,9 @@ fn inner() {
                 return;
             }
             let text: String = prompt.chars().take(160).collect();
-            DReq::Intent { repo_root, session, text, user: session_user() }
+            // Branch travels every turn, not just at SessionStart: a session
+            // that checks out a new branch must claim under the new one.
+            DReq::Intent { repo_root, session, text, user: session_user(), branch: git_branch(&cwd) }
         }
         "SessionEnd" => DReq::SessionEnd { repo_root, session },
         // The moment an agent tries to finish is the only reliable chance to
@@ -149,19 +151,24 @@ fn inner() {
                     "coord: {} other active session(s) on this repo right now:\n",
                     sessions.len()
                 ));
+                let mine = git_branch(&cwd);
                 for s in &sessions {
                     let intent = if s.intent.is_empty() {
                         "(no stated intent yet)".into()
                     } else {
                         format!("\"{}\"", s.intent)
                     };
+                    // A peer on another branch is not in the way; their work
+                    // and ours meet at merge instead, which is worth knowing
+                    // now and cannot be learned from git yet.
+                    let elsewhere = !crate::proto::same_branch(&s.branch, &mine);
                     let held: Vec<&str> = claims
                         .iter()
                         .filter(|c| c.session == s.session)
                         .map(|c| c.path.as_str())
                         .collect();
                     ctx.push_str(&format!(
-                        "- {} on branch {} — {}{}\n",
+                        "- {} on branch {} — {}{}{}\n",
                         s.user,
                         s.branch,
                         intent,
@@ -169,6 +176,11 @@ fn inner() {
                             String::new()
                         } else {
                             format!(" [working in: {}]", held.join(", "))
+                        },
+                        if elsewhere && !held.is_empty() {
+                            "  (different branch: you will not be blocked, but these files meet yours at merge)"
+                        } else {
+                            ""
                         },
                     ));
                 }

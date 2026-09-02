@@ -79,6 +79,7 @@ impl Client {
             user: "u".into(),
             path: path.into(),
             intent: intent.into(),
+        branch: String::new(),
         })
         .await;
         match self.claim_resp(&id).await {

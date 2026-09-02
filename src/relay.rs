@@ -396,13 +396,13 @@ async fn client(sock: WebSocket, app: Arc<App>) -> Result<()> {
                 app.commit(&repo, Event::SessionEnded { session: session.clone(), ts: now_ms() });
                 app.announce_freed(&repo, &session, freed);
             }
-            ClientMsg::ClaimReq { id, session, user, path, intent } => {
+            ClientMsg::ClaimReq { id, session, user, path, intent, branch } => {
                 // Arbitration: the one decision only the relay may make.
                 let verdict = {
                     let mut repos = app.repos.lock().unwrap();
                     let st = repos.get_mut(&repo).unwrap();
                     st.view.prune();
-                    st.view.conflicting(&session, &path).cloned()
+                    st.view.conflicting_on(&session, &path, &branch).cloned()
                 };
                 match verdict {
                     Some(holder) => {
@@ -438,6 +438,7 @@ async fn client(sock: WebSocket, app: Arc<App>) -> Result<()> {
                                 path,
                                 lease_until,
                                 intent,
+                                branch,
                             },
                         );
                         let _ = out_tx.send(ServerMsg::ClaimResp {

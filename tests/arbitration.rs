@@ -93,6 +93,7 @@ async fn loser_receives_holder_identity_and_intent() {
         user: "priya".into(),
         path: "src/auth.ts".into(),
         intent: "add logging".into(),
+        branch: String::new(),
     })
     .await;
 

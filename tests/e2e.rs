@@ -148,6 +148,110 @@ async fn session_start_injects_peer_presence_context() {
     assert!(ctx.contains("src/auth.ts"), "context must list held paths: {ctx}");
 }
 
+/// Two clones of one repo on two branches. Same repo id (same origin), same
+/// file, different working trees — which is not a collision, and blocking it
+/// is the false positive that gets a tool switched off.
+fn git_clone_dir(tag: &str, branch: &str, relay: &str, repo: &str) -> PathBuf {
+    let root = tmp(tag);
+    let run = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    run(&["init", "-q"]);
+    run(&["config", "user.email", "t@example.com"]);
+    run(&["config", "user.name", "t"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/response.js"), "// seed\n").unwrap();
+    run(&["add", "-A"]);
+    run(&["commit", "-qm", "seed"]);
+    // -B, not -b: the initial branch may already be the one we want.
+    run(&["checkout", "-q", "-B", branch]);
+    init_repo(&root, relay, repo);
+    root
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_on_another_branch_does_not_block() {
+    let url = start_relay().await;
+    let sock = start_daemon().await;
+    // One repo id, two checkouts: exactly what two teammates have.
+    let a = git_clone_dir("branch-a", "main", &url, "e2e-branches");
+    let b = git_clone_dir("branch-b", "feat/discounts", &url, "e2e-branches");
+
+    hook_as(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "sessA", "cwd": a.to_string_lossy()
+    }), Some("ash"));
+    hook_as(&sock, edit(&a, "sessA", "src/response.js", "PreToolUse"), Some("ash"));
+
+    hook_as(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "sessB", "cwd": b.to_string_lossy()
+    }), Some("priya"));
+    let out = hook_as(&sock, edit(&b, "sessB", "src/response.js", "PreToolUse"), Some("priya"));
+
+    assert!(
+        out.is_none(),
+        "a different branch is not a collision — the write must be allowed: {out:?}"
+    );
+}
+
+/// The same file on the *same* branch still blocks. Branch awareness must not
+/// become a hole in the thing that works.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_same_branch_still_blocks() {
+    let url = start_relay().await;
+    let sock = start_daemon().await;
+    let a = git_clone_dir("samebranch-a", "feat/x", &url, "e2e-samebranch");
+    let b = git_clone_dir("samebranch-b", "feat/x", &url, "e2e-samebranch");
+
+    hook_as(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "sessA", "cwd": a.to_string_lossy()
+    }), Some("ash"));
+    hook_as(&sock, edit(&a, "sessA", "src/response.js", "PreToolUse"), Some("ash"));
+
+    hook_as(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "sessB", "cwd": b.to_string_lossy()
+    }), Some("priya"));
+    let out = hook_as(&sock, edit(&b, "sessB", "src/response.js", "PreToolUse"), Some("priya"))
+        .expect("one branch, one file, two agents — this must still be denied");
+
+    assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+/// Allowed, but not silent: the write is told it will meet another branch's
+/// work at merge, while re-planning still costs one turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cross_branch_write_is_warned_about() {
+    let url = start_relay().await;
+    let sock = start_daemon().await;
+    let a = git_clone_dir("warn-a", "main", &url, "e2e-warn");
+    let b = git_clone_dir("warn-b", "feat/discounts", &url, "e2e-warn");
+
+    hook_as(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "sessA", "cwd": a.to_string_lossy()
+    }), Some("ash"));
+    hook_as(&sock, edit(&a, "sessA", "src/response.js", "PreToolUse"), Some("ash"));
+
+    hook_as(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "sessB", "cwd": b.to_string_lossy()
+    }), Some("priya"));
+    hook_as(&sock, edit(&b, "sessB", "src/response.js", "PreToolUse"), Some("priya"));
+    let out = hook_as(&sock, edit(&b, "sessB", "src/response.js", "PostToolUse"), Some("priya"))
+        .expect("a cross-branch write must say so");
+
+    let ctx = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap().to_string();
+    assert!(ctx.contains("ash"), "must name the peer: {ctx}");
+    assert!(ctx.contains("main"), "must name their branch: {ctx}");
+    assert!(ctx.contains("merge"), "must say where it lands: {ctx}");
+    assert!(!ctx.contains("blocked\n"), "must not read as a block: {ctx}");
+}
+
 /// Gap 1: a peer's write must reach the next turn on its own. A cheap model
 /// will not run `coord who`, so anything it needs to coordinate cannot sit
 /// behind a command it has to think of.

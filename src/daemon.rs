@@ -109,16 +109,15 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             // Hot path: local mirror check, microseconds. When it fires we
             // answer without troubling the relay — but the collision still has
             // to reach the log, or denials caught locally stay invisible.
+            // The local pre-check has to know our branch too, or it denies
+            // cross-branch writes before the arbiter ever sees them.
             let local = {
                 let v = rc.view.lock().unwrap();
-                v.conflicting(&session, &path).cloned().map(|c| {
-                    let user = v
-                        .sessions
-                        .get(&session)
-                        .map(|s| s.user.clone())
-                        .unwrap_or_else(whoami);
-                    (c, user)
-                })
+                let (user, branch) = match v.sessions.get(&session) {
+                    Some(s) => (s.user.clone(), s.branch.clone()),
+                    None => (whoami(), String::new()),
+                };
+                v.conflicting_on(&session, &path, &branch).cloned().map(|c| (c, user))
             };
             if let Some((c, user)) = local {
                 let _ = rc.tx.send(ClientMsg::Append {
@@ -144,14 +143,22 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             // Identity and intent must come from the owning session's record,
             // not from this daemon's environment — a daemon may serve sessions
             // started under a different user, and the brief names the holder.
-            let (intent, user) = {
+            let (intent, user, branch) = {
                 let v = rc.view.lock().unwrap();
                 match v.sessions.get(&session) {
-                    Some(s) => (s.intent.clone(), s.user.clone()),
-                    None => (String::new(), whoami()),
+                    Some(s) => (s.intent.clone(), s.user.clone(), s.branch.clone()),
+                    None => (String::new(), whoami(), String::new()),
                 }
             };
-            let _ = rc.tx.send(ClientMsg::ClaimReq { id: id.clone(), session, user, path: path.clone(), intent });
+            let sess_for_warn = session.clone();
+            let _ = rc.tx.send(ClientMsg::ClaimReq {
+                id: id.clone(),
+                session,
+                user,
+                path: path.clone(),
+                intent,
+                branch,
+            });
             match tokio::time::timeout(std::time::Duration::from_millis(CLAIM_TIMEOUT_MS), rx).await {
                 Ok(Ok(ServerMsg::ClaimResp { granted: false, holder, holder_user, holder_intent, lease_until, .. })) => {
                     let c = Claim {
@@ -160,12 +167,17 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                         path: path.clone(),
                         lease_until: lease_until.unwrap_or(0),
                         intent: holder_intent.unwrap_or_default(),
+                        branch: String::new(),
                     };
                     deny(&path, &c)
                 }
                 _ => {
                     rc.pending.lock().unwrap().remove(&id);
-                    DResp::Decision { allow: true, reason: None } // granted, or timeout → fail open
+                    // Granted, or timed out → fail open. Either way the write
+                    // is happening, so this is the moment to say whether it is
+                    // being written on top of another branch's work.
+                    warn_cross_branch(&rc, &sess_for_warn, &path);
+                    DResp::Decision { allow: true, reason: None }
                 }
             }
         }
@@ -173,9 +185,21 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             if let Some(rc) = ensure_repo(d, &repo_root).await {
                 let path = rel_path(&repo_root, &path);
                 let user = user_of(&rc, &session);
-                let ev = Event::FileWritten { session, user, path, ts: now_ms() };
+                let ev =
+                    Event::FileWritten { session: session.clone(), user, path: path.clone(), ts: now_ms() };
                 rc.view.lock().unwrap().apply(&ev);
                 let _ = rc.tx.send(ClientMsg::Append { event: ev });
+                // Not a block and not mail: a note about work that is going to
+                // meet this write at merge, delivered while the turn can still
+                // act on it.
+                let peers = {
+                    let v = rc.view.lock().unwrap();
+                    let branch = v.sessions.get(&session).map(|s| s.branch.clone()).unwrap_or_default();
+                    v.cross_branch_overlap(&session, &path, &branch)
+                };
+                if let Some(note) = cross_branch_note(&peers, &path) {
+                    return DResp::Mail { items: vec![note] };
+                }
             }
             DResp::Ok
         }
@@ -197,10 +221,15 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                 mail,
             }
         }
-        DReq::Intent { repo_root, session, text, user } => {
+        DReq::Intent { repo_root, session, text, user, branch } => {
             let Some(rc) = ensure_repo(d, &repo_root).await else { return DResp::Ok };
             ensure_session(&rc, &session, &user);
-            let ev = Event::IntentDeclared { session: session.clone(), text, ts: now_ms() };
+            let ev = Event::IntentDeclared {
+                session: session.clone(),
+                text,
+                ts: now_ms(),
+                branch,
+            };
             rc.view.lock().unwrap().apply(&ev);
             let _ = rc.tx.send(ClientMsg::Append { event: ev });
             // Answer with everything the agent would otherwise have to ask
@@ -247,8 +276,9 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                     continue; // outside the repo
                 }
                 let hit = {
+                    let branch = branch_of(&rc, &session);
                     let v = rc.view.lock().unwrap();
-                    v.conflicting(&session, &path).cloned()
+                    v.conflicting_on(&session, &path, &branch).cloned()
                 };
                 if let Some(c) = hit {
                     report_denied(&rc, &session, &path, &c);
@@ -313,13 +343,16 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                 // we exist to catch.
                 let we_named_it = mentions_path(&pending.command, &path);
                 let held = {
+                    let branch = branch_of(&rc, &session);
                     let v = rc.view.lock().unwrap();
                     // The tree is shared, so a peer's concurrent edit lands in
                     // our window too; their own write event says it was theirs.
                     if !we_named_it && v.written_by_other_since(&session, &path, taken_at) {
                         continue;
                     }
-                    v.conflicting(&session, &path).cloned()
+                    // Branch-scoped: writing a file another branch holds is not
+                    // an ungated write, it is two trees that will meet later.
+                    v.conflicting_on(&session, &path, &branch).cloned()
                 };
                 match held {
                     // A write landed on someone else's file. It cannot be
@@ -541,14 +574,68 @@ fn user_of(rc: &Arc<RepoConn>, session: &str) -> String {
         .unwrap_or_else(whoami)
 }
 
+/// The branch a session is on, per its own record. Empty when unknown, which
+/// `same_branch` treats as "assume same branch and block".
+fn branch_of(rc: &Arc<RepoConn>, session: &str) -> String {
+    rc.view.lock().unwrap().sessions.get(session).map(|s| s.branch.clone()).unwrap_or_default()
+}
+
+/// The note handed back with an allowed write. Names the branch and the peer,
+/// because "you will conflict" is only actionable if you know with whom.
+fn cross_branch_note(peers: &[Claim], path: &str) -> Option<String> {
+    if peers.is_empty() {
+        return None;
+    }
+    let who: Vec<String> = peers
+        .iter()
+        .map(|p| format!("{} on branch {}", p.user, if p.branch.is_empty() { "?" } else { &p.branch }))
+        .collect();
+    Some(format!(
+        "coord: {} is also editing {} right now. Nothing is blocked — you are on different \
+         branches — but these edits will meet at merge. Keep your change tight and scoped, and \
+         consider `coord msg` to agree who owns which part.",
+        who.join(" and "),
+        path
+    ))
+}
+
+/// A write allowed onto a file someone else holds on another branch. Nothing
+/// is blocked — the trees are separate until a merge — but this is the moment
+/// re-planning is cheap, and the only moment anyone can be told.
+fn warn_cross_branch(rc: &Arc<RepoConn>, session: &str, path: &str) -> Vec<Claim> {
+    let (branch, user, peers) = {
+        let v = rc.view.lock().unwrap();
+        let (branch, user) = match v.sessions.get(session) {
+            Some(s) => (s.branch.clone(), s.user.clone()),
+            None => (String::new(), whoami()),
+        };
+        let peers = v.cross_branch_overlap(session, path, &branch);
+        (branch, user, peers)
+    };
+    for p in &peers {
+        let _ = rc.tx.send(ClientMsg::Append {
+            event: Event::CrossBranchOverlap {
+                session: session.to_string(),
+                user: user.clone(),
+                branch: branch.clone(),
+                path: path.to_string(),
+                peer_user: p.user.clone(),
+                peer_branch: p.branch.clone(),
+                ts: now_ms(),
+            },
+        });
+    }
+    peers
+}
+
 /// Optimistically claim locally and tell the relay. Used where we have already
 /// decided to allow the write, so a synchronous round-trip buys nothing.
 fn claim_locally(rc: &Arc<RepoConn>, session: &str, path: &str) {
-    let (intent, user) = {
+    let (intent, user, branch) = {
         let v = rc.view.lock().unwrap();
         match v.sessions.get(session) {
-            Some(s) => (s.intent.clone(), s.user.clone()),
-            None => (String::new(), whoami()),
+            Some(s) => (s.intent.clone(), s.user.clone(), s.branch.clone()),
+            None => (String::new(), whoami(), String::new()),
         }
     };
     let ev = Event::ClaimAcquired {
@@ -557,6 +644,7 @@ fn claim_locally(rc: &Arc<RepoConn>, session: &str, path: &str) {
         path: path.to_string(),
         lease_until: now_ms() + LEASE_MS,
         intent,
+        branch,
     };
     rc.view.lock().unwrap().apply(&ev);
     let _ = rc.tx.send(ClientMsg::Append { event: ev });

@@ -14,6 +14,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/lab/metrics.sh"
+source "$ROOT/lab/agent.sh"
 COORD="$ROOT/target/release/coord"
 REPO_URL="${COORD_DOGFOOD_URL:-https://github.com/expressjs/express.git}"
 WORK="${COORD_DOGFOOD_DIR:-$HOME/coord-dogfood}"
@@ -21,6 +22,8 @@ REPO="$WORK/$(basename "$REPO_URL" .git)"
 RELAY_ADDR="${COORD_RELAY_ADDR:-127.0.0.1:7420}"
 DB="$HOME/.coord/relay.db"
 MODEL="${COORD_LAB_MODEL:-haiku}"
+# See lab/agent.sh: one turn cannot observe turn-start context.
+TURNS="${COORD_LAB_TURNS:-3}"
 OUT="${COORD_LAB_OUT:-/tmp/coord-dogfood}"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -61,7 +64,7 @@ pgrep -f "coord daemon" >/dev/null || { "$COORD" daemon >/tmp/coord-daemon.log 2
 grep -qx '.coord.toml' "$REPO/.git/info/exclude" 2>/dev/null || \
   printf '.coord.toml\n.claude/\n' >> "$REPO/.git/info/exclude"
 
-echo "running ${#AGENTS[@]} $MODEL agents on $REPO ..."
+echo "running ${#AGENTS[@]} $MODEL agents on $REPO, $TURNS turns each ..."
 git -C "$REPO" rev-parse --short HEAD | sed 's/^/  at commit /'
 pids=()
 for name in "${AGENTS[@]}"; do
@@ -79,9 +82,7 @@ you will be told who holds the file and why — wait, pick a different part of
 your task, or use \`coord msg <user|all> "text"\` to negotiate. Say when you are
 done with a file so whoever is waiting can move.
 EOF
-  ( cd "$REPO" && COORD_USER="$name" claude -p "$prompt" \
-        --model "$MODEL" --permission-mode acceptEdits \
-        >"$OUT/$name.log" 2>&1 ) &
+  ( cd "$REPO" && run_agent "$name" "$prompt" >"$OUT/$name.log" 2>&1 ) &
   pids+=($!)
   echo "  started $name (pid ${pids[${#pids[@]}-1]}) -> $OUT/$name.log"
 done
