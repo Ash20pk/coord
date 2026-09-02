@@ -794,11 +794,33 @@ async fn ensure_repo(d: &Arc<Daemon>, repo_root: &str) -> Option<Arc<RepoConn>> 
     Some(rc)
 }
 
+/// Dial the relay, presenting this user's token when one is known. A relay
+/// with no token configured ignores the header, so the same client works
+/// against a loopback relay and a hosted one.
+async fn connect_authed(
+    url: &str,
+) -> Result<(
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::handshake::client::Response,
+)> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = url.into_client_request()?;
+    if let Some(tok) = crate::config::token_for(url) {
+        req.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {tok}").parse().map_err(|_| anyhow::anyhow!("bad token"))?,
+        );
+    }
+    Ok(tokio_tungstenite::connect_async(req).await?)
+}
+
 /// Owns the WebSocket to the relay. Reconnects forever with backoff.
 async fn relay_loop(cfg: RepoConfig, rc: Arc<RepoConn>, mut rx: mpsc::UnboundedReceiver<ClientMsg>) {
+    let mut announced_auth_failure = false;
     loop {
-        match tokio_tungstenite::connect_async(&cfg.relay).await {
+        match connect_authed(&cfg.relay).await {
             Ok((ws, _)) => {
+                announced_auth_failure = false;
                 *rc.connected.lock().unwrap() = true;
                 let (mut w, mut r) = ws.split();
                 let hello = ClientMsg::Hello { repo: cfg.repo.clone(), daemon: whoami() };
@@ -839,8 +861,21 @@ async fn relay_loop(cfg: RepoConfig, rc: Arc<RepoConn>, mut rx: mpsc::UnboundedR
                 }
                 *rc.connected.lock().unwrap() = false;
             }
-            Err(_) => {
+            Err(e) => {
                 *rc.connected.lock().unwrap() = false;
+                // Rejected and unreachable look identical to an agent — both
+                // fail open — but they are not the same thing to the human, so
+                // say which, once, rather than every three seconds.
+                let msg = e.to_string();
+                if !announced_auth_failure && msg.contains("401") {
+                    eprintln!(
+                        "coord: relay {} rejected this daemon's token. Coordination is OFF \
+                         (edits are allowed, as always when the relay is unavailable). Fix with: \
+                         coord login --relay {} --token <token>",
+                        cfg.relay, cfg.relay
+                    );
+                    announced_auth_failure = true;
+                }
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;

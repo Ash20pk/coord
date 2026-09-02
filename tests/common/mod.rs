@@ -13,6 +13,15 @@ pub fn tmp(tag: &str) -> PathBuf {
     p
 }
 
+/// Start an in-process relay that requires `token`; returns its ws:// URL.
+pub async fn start_relay_with_token(token: &str) -> String {
+    let db = tmp("relay").join("relay.db");
+    let addr = coord::relay::start_with_token("127.0.0.1:0", db, Some(token.to_string()))
+        .await
+        .unwrap();
+    format!("ws://{addr}/ws")
+}
+
 /// Start an in-process relay on an ephemeral port; returns its ws:// URL.
 pub async fn start_relay() -> String {
     let db = tmp("relay").join("relay.db");

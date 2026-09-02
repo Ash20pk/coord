@@ -121,9 +121,24 @@ because it got in the way once. coord has proof that it cannot.
 **Best.** First line of the README: *if coord is broken, your agents do not
 know.* The distinction from every alternative, stated where people decide.
 
-### 7. Not deployable by a team yet
+### 7. Not deployable by a team yet — CLOSED
 
-**Today.** Relay on `127.0.0.1`, no auth, no TLS.
+**Was.** Relay on `127.0.0.1`, no auth, no TLS.
+
+**Now.** `COORD_RELAY_TOKEN` makes the relay require a bearer token on the
+websocket, the data APIs and the lab terminals (a terminal is a shell on the
+host, so it is gated hardest); browsers pass `?token=` because they cannot set
+headers on a WebSocket. `coord login --relay <url> --token <t>` stores it in
+`~/.coord/credentials.toml` at 0600, keyed by relay origin so one login serves
+every repo on that relay — and deliberately **not** in the committed
+`.coord.toml`. `COORD_TOKEN` overrides for CI. The client speaks `wss://`.
+Startup prints whether auth is on, and says so loudly when an open relay is
+bound off-loopback. A rejected token fails open, with one line on stderr
+naming the fix: an operator's mistake cannot become the team's outage.
+
+**Left.** TLS termination is a proxy's job today, there is no token rotation
+or per-user identity (one shared team secret), and nothing is deployed
+anywhere yet.
 
 **Best.** Hosted relay, bearer token per team, TLS. No product thinking; an
 afternoon. Repo identity is already derived from the `origin` URL, so two
@@ -176,6 +191,6 @@ receipts wins by default.
 
 1. Push coordination into every turn (gap 1) — days
 2. Branch-aware claims (gap 2) — a day
-3. Hosted relay with token auth (gap 7) — an afternoon
+3. ~~Hosted relay with token auth (gap 7)~~ — done
 4. One design-partner team, one week, read the numbers (gap 8)
 5. Then, and only then, decide between gaps 3, 4, 5 on what the log says

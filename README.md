@@ -4,6 +4,36 @@ Realtime coordination for coding agents. A sequenced event log per repo, with
 claims, leases, and conflict briefs — so multiple Claude Code (or any) agent
 sessions can work the same repo without stepping on each other.
 
+
+## Hosting it for a team
+
+The relay is unauthenticated by default, which is right for `127.0.0.1` and
+wrong for anything else. Give it a shared secret and it requires one:
+
+```sh
+COORD_RELAY_TOKEN=$(openssl rand -hex 24) coord relay --listen 0.0.0.0:7420
+```
+
+Each teammate stores that token once, per relay:
+
+```sh
+coord login --relay wss://relay.example.com/ws --token <token>   # ~/.coord/credentials.toml, 0600
+```
+
+`COORD_TOKEN` overrides it, for CI and containers. Tokens deliberately do
+**not** live in `.coord.toml`: that file is committed so a clone is enrolled
+with no setup, and a secret must never ride along with it.
+
+Use `wss://` off-machine — a bearer token over plaintext is a token anyone on
+the path can take. coord speaks `wss://` directly; terminate TLS with a proxy
+in front of the relay, or at your load balancer.
+
+**A relay that refuses you still fails open.** A rejected token means
+coordination is off, not that anyone is blocked: the daemon says so once, on
+stderr, and every edit is allowed. An operator's auth mistake cannot become an
+outage for the team.
+
+
 ## How it works
 
 ```

@@ -24,6 +24,9 @@ struct App {
     /// Live agent terminals. Only present when the relay was asked to host a
     /// lab; a plain relay spawns no processes.
     terms: Option<Arc<crate::term::Terms>>,
+    /// Shared team secret every client must present. `None` means an open
+    /// relay, which is fine on loopback and nowhere else.
+    token: Option<String>,
 }
 
 impl App {
@@ -88,7 +91,18 @@ impl App {
 /// Bind and serve in the background; returns the actual bound address.
 /// Used by tests (port 0) and by `run`.
 pub async fn start(listen: &str, db_path: PathBuf) -> Result<std::net::SocketAddr> {
-    let (listener, app) = prepare(listen, db_path).await?;
+    start_with_token(listen, db_path, relay_token()).await
+}
+
+/// As `start`, with the required token passed in rather than read from the
+/// environment. Tests need this: a process-wide env var cannot describe two
+/// relays, and reading it at construction is the right shape anyway.
+pub async fn start_with_token(
+    listen: &str,
+    db_path: PathBuf,
+    token: Option<String>,
+) -> Result<std::net::SocketAddr> {
+    let (listener, app) = prepare_with_token(listen, db_path, token).await?;
     let addr = listener.local_addr()?;
     let router = routes(app);
     tokio::spawn(async move {
@@ -98,6 +112,14 @@ pub async fn start(listen: &str, db_path: PathBuf) -> Result<std::net::SocketAdd
 }
 
 async fn prepare(listen: &str, db_path: PathBuf) -> Result<(tokio::net::TcpListener, Arc<App>)> {
+    prepare_with_token(listen, db_path, relay_token()).await
+}
+
+async fn prepare_with_token(
+    listen: &str,
+    db_path: PathBuf,
+    token: Option<String>,
+) -> Result<(tokio::net::TcpListener, Arc<App>)> {
     if let Some(dir) = db_path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -112,6 +134,7 @@ async fn prepare(listen: &str, db_path: PathBuf) -> Result<(tokio::net::TcpListe
         repos: Mutex::new(HashMap::new()),
         db: Mutex::new(conn),
         terms: None,
+        token,
     });
     let listener = tokio::net::TcpListener::bind(listen).await?;
     Ok((listener, app))
@@ -178,12 +201,70 @@ pub async fn run(listen: String, db_path: PathBuf, lab: Option<LabOpts>) -> Resu
     let router = routes(app);
     let shown = listen.replace("0.0.0.0", "127.0.0.1");
     eprintln!("coord relay listening on ws://{listen}/ws (audit log: {})", db_path.display());
+    match relay_token() {
+        Some(_) => eprintln!("  auth:      token required (COORD_RELAY_TOKEN)"),
+        None => {
+            let loopback = listen.starts_with("127.0.0.1") || listen.starts_with("localhost");
+            if loopback {
+                eprintln!("  auth:      none (loopback only)");
+            } else {
+                // Not a hard failure: an operator may have a proxy in front.
+                // But an unauthenticated relay on a public interface hands
+                // anyone the event log and, in lab mode, a shell.
+                eprintln!(
+                    "  auth:      NONE, and {listen} is not loopback. Set COORD_RELAY_TOKEN \
+                     unless something in front of this is doing authentication."
+                );
+            }
+        }
+    }
     eprintln!("  dashboard: http://{shown}/");
     if has_terms {
         eprintln!("  lab:       http://{shown}/lab");
     }
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+/// The token this relay requires, if any. A relay with no token set is open —
+/// which is right for `127.0.0.1` and wrong for anything hosted, so `serve`
+/// says so out loud at startup.
+pub fn relay_token() -> Option<String> {
+    std::env::var("COORD_RELAY_TOKEN").ok().filter(|t| !t.is_empty())
+}
+
+/// Constant-time-ish comparison. Tokens are short and this is not the weak
+/// point of the system, but there is no reason to leak length or prefix.
+fn token_matches(expected: &str, got: &str) -> bool {
+    if expected.len() != got.len() {
+        return false;
+    }
+    expected.bytes().zip(got.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+}
+
+/// Bearer header, or `?token=` for a browser that cannot set headers.
+fn authorized(app: &App, headers: &axum::http::HeaderMap, query: Option<&str>) -> bool {
+    let Some(expected) = app.token.as_deref() else {
+        return true; // open relay
+    };
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim);
+    if let Some(got) = bearer {
+        if token_matches(expected, got) {
+            return true;
+        }
+    }
+    query
+        .and_then(|q| {
+            q.split('&')
+                .filter_map(|kv| kv.split_once('='))
+                .find(|(k, _)| *k == "token")
+                .map(|(_, v)| v.to_string())
+        })
+        .is_some_and(|got| token_matches(expected, &got))
 }
 
 fn routes(app: Arc<App>) -> Router {
@@ -199,7 +280,18 @@ fn routes(app: Arc<App>) -> Router {
 }
 
 /// The agent terminals this relay is hosting, if any.
-async fn terms_handler(State(app): State<Arc<App>>) -> impl IntoResponse {
+async fn terms_handler(
+    State(app): State<Arc<App>>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    if !authorized(&app, &headers, uri.query()) {
+        return unauthorized();
+    }
+    terms_body(app).await.into_response()
+}
+
+async fn terms_body(app: Arc<App>) -> impl IntoResponse {
     match &app.terms {
         Some(t) => Json(serde_json::json!({ "dir": t.dir, "agents": t.names() })),
         None => Json(serde_json::json!({ "dir": null, "agents": [] })),
@@ -212,7 +304,14 @@ async fn term_ws_handler(
     ws: WebSocketUpgrade,
     AxPath(idx): AxPath<usize>,
     State(app): State<Arc<App>>,
-) -> impl IntoResponse {
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    // A terminal is a shell on the host. If anything on this relay is gated,
+    // this is.
+    if !authorized(&app, &headers, uri.query()) {
+        return unauthorized();
+    }
     let term = app.terms.as_ref().and_then(|t| t.get(idx));
     ws.on_upgrade(move |sock| async move {
         let Some(term) = term else { return };
@@ -257,7 +356,18 @@ async fn term_ws_handler(
 }
 
 /// Repos this relay has seen, live ones first.
-async fn repos_handler(State(app): State<Arc<App>>) -> impl IntoResponse {
+async fn repos_handler(
+    State(app): State<Arc<App>>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    if !authorized(&app, &headers, uri.query()) {
+        return unauthorized();
+    }
+    repos_body(app).await.into_response()
+}
+
+async fn repos_body(app: Arc<App>) -> impl IntoResponse {
     let mut live: Vec<String> = app.repos.lock().unwrap().keys().cloned().collect();
     live.sort();
     let db = app.db.lock().unwrap();
@@ -285,7 +395,16 @@ struct EventsQuery {
 async fn events_handler(
     State(app): State<Arc<App>>,
     Query(q): Query<EventsQuery>,
-) -> impl IntoResponse {
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    if !authorized(&app, &headers, uri.query()) {
+        return unauthorized();
+    }
+    events_body(app, q).await.into_response()
+}
+
+async fn events_body(app: Arc<App>, q: EventsQuery) -> impl IntoResponse {
     let limit = q.limit.unwrap_or(400).min(2000);
     let db = app.db.lock().unwrap();
     let mut out: Vec<serde_json::Value> = Vec::new();
@@ -305,10 +424,31 @@ async fn events_handler(
     Json(out)
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(app): State<Arc<App>>) -> impl IntoResponse {
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(app): State<Arc<App>>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    if !authorized(&app, &headers, uri.query()) {
+        return unauthorized();
+    }
     ws.on_upgrade(move |sock| async move {
         let _ = client(sock, app).await;
     })
+    .into_response()
+}
+
+/// A refusal an operator can read in a log and a client can act on. Never a
+/// silent drop: a daemon that cannot tell "rejected" from "unreachable" cannot
+/// tell the human why coordination stopped.
+fn unauthorized() -> axum::response::Response {
+    (
+        axum::http::StatusCode::UNAUTHORIZED,
+        "coord relay: missing or invalid token. Run `coord login --relay <url> --token <token>`, \
+         or set COORD_TOKEN.\n",
+    )
+        .into_response()
 }
 
 async fn client(sock: WebSocket, app: Arc<App>) -> Result<()> {
@@ -458,4 +598,61 @@ async fn client(sock: WebSocket, app: Arc<App>) -> Result<()> {
     pump.abort();
     writer.abort();
     Ok(())
+}
+
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+
+    fn app_with(token: Option<&str>) -> App {
+        App {
+            repos: Mutex::new(HashMap::new()),
+            db: Mutex::new(rusqlite::Connection::open_in_memory().unwrap()),
+            terms: None,
+            token: token.map(str::to_string),
+        }
+    }
+
+    fn bearer(v: &str) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(axum::http::header::AUTHORIZATION, v.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn an_open_relay_accepts_anything() {
+        let app = app_with(None);
+        assert!(authorized(&app, &axum::http::HeaderMap::new(), None));
+    }
+
+    #[test]
+    fn a_token_relay_needs_the_token() {
+        let app = app_with(Some("sekrit"));
+        assert!(!authorized(&app, &axum::http::HeaderMap::new(), None));
+        assert!(authorized(&app, &bearer("Bearer sekrit"), None));
+        assert!(!authorized(&app, &bearer("Bearer nope"), None));
+        assert!(!authorized(&app, &bearer("sekrit"), None), "must be a Bearer token");
+    }
+
+    /// Browsers cannot set headers on a websocket or an <img>, so the query
+    /// form exists; it must be exactly as strict.
+    #[test]
+    fn the_query_form_works_and_is_just_as_strict() {
+        let app = app_with(Some("sekrit"));
+        let none = axum::http::HeaderMap::new();
+        assert!(authorized(&app, &none, Some("token=sekrit")));
+        assert!(authorized(&app, &none, Some("repo=x&token=sekrit")));
+        assert!(!authorized(&app, &none, Some("token=nope")));
+        assert!(!authorized(&app, &none, Some("repo=x")));
+        assert!(!authorized(&app, &none, Some("token=sekritextra")));
+    }
+
+    #[test]
+    fn comparison_does_not_short_circuit_on_length() {
+        assert!(token_matches("abcd", "abcd"));
+        assert!(!token_matches("abcd", "abc"));
+        assert!(!token_matches("abcd", "abcde"));
+        assert!(!token_matches("abcd", "abce"));
+    }
 }

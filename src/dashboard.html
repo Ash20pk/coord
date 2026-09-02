@@ -91,6 +91,18 @@
 <footer id="foot">connecting…</footer>
 
 <script>
+// A hosted relay requires a token. A browser cannot set headers on these,
+// so it travels as ?token= — taken from this page's own URL, and remembered
+// so a reload does not need it again.
+const TOKEN = (() => {
+  const q = new URLSearchParams(location.search).get('token');
+  try {
+    if (q) { sessionStorage.setItem('coordToken', q); return q; }
+    return sessionStorage.getItem('coordToken') || '';
+  } catch (_) { return q || ''; }
+})();
+const withTok = (u) => TOKEN ? u + (u.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN) : u;
+
 const LEASE_MS = 600000;
 let ws, repo = new URLSearchParams(location.search).get('repo');
 let sessions = new Map(), claims = [], lastWrite = new Map();
@@ -102,7 +114,7 @@ const hhmm = ts => new Date(ts).toLocaleTimeString([], {hour12:false});
 const short = s => String(s).slice(0,8);
 
 async function boot(){
-  const repos = await fetch('/api/repos').then(r => r.json()).catch(() => []);
+  const repos = await fetch(withTok('/api/repos')).then(r => r.json()).catch(() => []);
   const sel = $('repo');
   sel.innerHTML = repos.map(r => `<option>${esc(r)}</option>`).join('') || '<option>—</option>';
   if (!repo || !repos.includes(repo)) repo = repos[0];
@@ -121,13 +133,13 @@ function resetView(){
 
 // Replay stored history so the page is useful the moment it opens.
 async function history(){
-  const evs = await fetch('/api/events?repo=' + encodeURIComponent(repo)).then(r => r.json()).catch(() => []);
+  const evs = await fetch(withTok('/api/events?repo=' + encodeURIComponent(repo))).then(r => r.json()).catch(() => []);
   for (const e of evs) apply(e, false);
   render();
 }
 
 function connect(){
-  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws = new WebSocket(withTok((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws'));
   ws.onopen = () => {
     $('dot').classList.add('on');
     $('foot').textContent = 'live · ' + repo;

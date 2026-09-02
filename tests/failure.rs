@@ -131,3 +131,51 @@ async fn a_claim_holder_can_keep_editing_its_own_file() {
         assert!(allowed(&r), "own file must stay editable across turns (attempt {i})");
     }
 }
+
+/// A relay that requires a token, and a client that has none, is a relay this
+/// daemon cannot reach. The agent must still be able to work: an operator's
+/// auth mistake cannot become an outage for every developer on the team.
+#[tokio::test]
+async fn a_relay_that_refuses_us_still_fails_open() {
+    let url = start_relay_with_token("the-real-token").await;
+    let sock = start_daemon().await;
+    let root = tmp("badtoken");
+    // Credentials are keyed by relay origin, and this one is an ephemeral
+    // port, so there is nothing on disk or in the environment that matches.
+    init_repo(&root, &url, "failure-authed");
+
+    let r = ask(&sock, prewrite(&root, "s1", "src/auth.ts")).await;
+    match r {
+        None => {}
+        Some(DResp::Decision { allow, .. }) => {
+            assert!(allow, "a relay that rejected us must never block an edit");
+        }
+        other => panic!("unexpected verdict: {other:?}"),
+    }
+}
+
+/// And the gate is real: the socket itself is refused without a token.
+#[tokio::test]
+async fn an_unauthenticated_client_is_refused_by_the_relay() {
+    let url = start_relay_with_token("sekrit").await;
+
+    assert!(
+        tokio_tungstenite::connect_async(&url).await.is_err(),
+        "a tokenless client must not get a socket"
+    );
+
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = url.as_str().into_client_request().unwrap();
+    req.headers_mut().insert("Authorization", "Bearer sekrit".parse().unwrap());
+    assert!(
+        tokio_tungstenite::connect_async(req).await.is_ok(),
+        "the right token must still get in"
+    );
+
+    let mut wrong = url.as_str().into_client_request().unwrap();
+    wrong.headers_mut().insert("Authorization", "Bearer nope".parse().unwrap());
+    assert!(
+        tokio_tungstenite::connect_async(wrong).await.is_err(),
+        "a wrong token must be refused, not merely logged"
+    );
+}

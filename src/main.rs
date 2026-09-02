@@ -44,6 +44,15 @@ enum Cmd {
         #[arg(long)]
         repo: Option<String>,
     },
+    /// Store the token for a relay (kept in ~/.coord/credentials.toml, not in
+    /// the repo — .coord.toml is committed and must never carry a secret)
+    Login {
+        #[arg(long)]
+        relay: String,
+        /// The team's shared relay token
+        #[arg(long)]
+        token: String,
+    },
     /// Show active sessions and claims on this repo
     Who,
     /// Live dashboard of sessions, claims, and collisions on this repo
@@ -77,6 +86,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Init { relay, repo } => init(relay, repo),
+        Cmd::Login { relay, token } => login(relay, token),
         Cmd::Who => who(),
         Cmd::Msg { to, text } => msg(to, text.join(" ")),
         Cmd::Inbox { user } => inbox(user),
@@ -242,6 +252,21 @@ fn inbox(user: Option<String>) -> Result<()> {
         Some(DResp::Err { msg }) => anyhow::bail!(msg),
         _ => anyhow::bail!("coordd not running — start it with `coord daemon`"),
     }
+}
+
+fn login(relay: String, token: String) -> Result<()> {
+    let origin = config::relay_origin(&relay);
+    let mut creds = config::Credentials::load();
+    creds.tokens.insert(origin.clone(), token);
+    creds.save()?;
+    println!("token stored for {origin}");
+    if relay.starts_with("ws://") && !origin.contains("127.0.0.1") && !origin.contains("localhost") {
+        // A bearer token over plaintext is a token anyone on the path can take.
+        println!(
+            "warning: {origin} is not TLS. Use wss:// for anything outside this machine."
+        );
+    }
+    Ok(())
 }
 
 fn who() -> Result<()> {

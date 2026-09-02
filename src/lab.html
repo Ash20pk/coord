@@ -93,6 +93,18 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm-addon-fit/0.8.0/xterm-addon-fit.min.js"></script>
 <script>
+// A hosted relay requires a token. A browser cannot set headers on these,
+// so it travels as ?token= — taken from this page's own URL, and remembered
+// so a reload does not need it again.
+const TOKEN = (() => {
+  const q = new URLSearchParams(location.search).get('token');
+  try {
+    if (q) { sessionStorage.setItem('coordToken', q); return q; }
+    return sessionStorage.getItem('coordToken') || '';
+  } catch (_) { return q || ''; }
+})();
+const withTok = (u) => TOKEN ? u + (u.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN) : u;
+
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const hhmm = ts => new Date(ts).toLocaleTimeString([], {hour12:false});
@@ -132,7 +144,7 @@ function mountTerm(idx, name){
   const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
   let ws, dead = false;
   const open = () => {
-    ws = new WebSocket(`${proto}${location.host}/term/ws/${idx}`);
+    ws = new WebSocket(withTok(`${proto}${location.host}/term/ws/${idx}`));
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => { fitNow(); };
     ws.onmessage = e => term.write(new Uint8Array(e.data));
@@ -150,7 +162,7 @@ function mountTerm(idx, name){
 }
 
 async function boot(){
-  const info = await fetch('/api/terms').then(r => r.json()).catch(() => ({agents:[]}));
+  const info = await fetch(withTok('/api/terms')).then(r => r.json()).catch(() => ({agents:[]}));
   agents = info.agents || [];
   if (!agents.length){
     $('terms').innerHTML = '<div class="empty">no terminals — start the relay with --lab-dir</div>';
@@ -165,21 +177,21 @@ async function boot(){
     agents.forEach((n, i) => mountTerm(i, n));
   }
 
-  const repos = await fetch('/api/repos').then(r => r.json()).catch(() => []);
+  const repos = await fetch(withTok('/api/repos')).then(r => r.json()).catch(() => []);
   repo = repos[0];
   $('repo').textContent = info.dir ? `${info.dir}` : (repo || '');
   if (repo){ await history(); connect(); }
 }
 
 async function history(){
-  const evs = await fetch('/api/events?repo=' + encodeURIComponent(repo)).then(r => r.json()).catch(() => []);
+  const evs = await fetch(withTok('/api/events?repo=' + encodeURIComponent(repo))).then(r => r.json()).catch(() => []);
   for (const e of evs) apply(e, false);
   render();
 }
 
 function connect(){
   const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-  const ws = new WebSocket(proto + location.host + '/ws');
+  const ws = new WebSocket(withTok(proto + location.host + '/ws'));
   ws.onopen = () => {
     $('dot').classList.add('on'); $('live-tag').textContent = 'live';
     ws.send(JSON.stringify({type:'hello', repo, daemon:'lab-web'}));
