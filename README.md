@@ -5,6 +5,37 @@ claims, leases, and conflict briefs — so multiple Claude Code (or any) agent
 sessions can work the same repo without stepping on each other.
 
 
+
+## Enrolling a team
+
+```sh
+coord init --relay wss://relay.example.com/ws   # once, by one person
+git add .coord.toml .claude/settings.json && git commit
+```
+
+Both files are meant to be committed. The hooks call `coord` **by name**, so
+they resolve on every machine that has the binary on `PATH` — set `COORD_BIN`
+if yours lives somewhere unusual. Each teammate then needs three things: the
+binary, `coord daemon` running, and `coord login` if the relay requires a
+token.
+
+Because coord fails open, a broken install looks exactly like a quiet one from
+inside an agent. `coord status` is how a human tells the difference:
+
+```
+$ coord status
+[ok  ] binary    /usr/local/bin/coord
+[ok  ] repo      /Users/you/project (id: project-4f2a1c)
+[ok  ] hooks     6 events, resolved from PATH
+[ok  ] daemon    responding
+[ok  ] relay     wss://relay.example.com/ws (token: present)
+
+coordination is on.
+```
+
+Anything less than that prints what is wrong and the command that fixes it.
+
+
 ## Hosting it for a team
 
 The relay is unauthenticated by default, which is right for `127.0.0.1` and

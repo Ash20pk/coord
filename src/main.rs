@@ -53,6 +53,8 @@ enum Cmd {
         #[arg(long)]
         token: String,
     },
+    /// Is coordination actually on? Checks binary, hooks, daemon, relay, token
+    Status,
     /// Show active sessions and claims on this repo
     Who,
     /// Live dashboard of sessions, claims, and collisions on this repo
@@ -87,6 +89,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Init { relay, repo } => init(relay, repo),
         Cmd::Login { relay, token } => login(relay, token),
+        Cmd::Status => status(),
         Cmd::Who => who(),
         Cmd::Msg { to, text } => msg(to, text.join(" ")),
         Cmd::Inbox { user } => inbox(user),
@@ -132,14 +135,36 @@ fn derive_repo_id(root: &std::path::Path) -> String {
     format!("{slug}-{h:08x}")
 }
 
+/// Whether a settings.json hook command is one of ours. Matches the absolute
+/// paths written by older versions as well as the PATH form, so re-running
+/// `init` repairs a committed config instead of appending a second entry.
+fn is_coord_hook(cmd: &str) -> bool {
+    let cmd = cmd.trim();
+    if !cmd.ends_with(" hook") {
+        return false;
+    }
+    let prog = cmd.trim_end_matches(" hook");
+    prog == "coord"
+        || prog == "${COORD_BIN:-coord}"
+        || prog.rsplit('/').next() == Some("coord")
+}
+
 fn init(relay: String, repo: Option<String>) -> Result<()> {
     let root = repo_root_here();
     let repo_id = repo.unwrap_or_else(|| derive_repo_id(&root));
     RepoConfig { relay: relay.clone(), repo: repo_id.clone() }.save(&root)?;
 
     // Install hooks into <root>/.claude/settings.json (merge, don't clobber).
-    let exe = std::env::current_exe()?.to_string_lossy().to_string();
-    let hook_cmd = format!("{exe} hook");
+    //
+    // The command must resolve on *every* teammate's machine, because this
+    // file is committed — that is the whole onboarding story. Writing
+    // `current_exe()` here bakes in the path of whoever ran `init`
+    // (`/Users/someone/coord/target/release/coord`), which does not exist for
+    // anyone else: their hooks fail, coord fails open, and it silently does
+    // nothing for the whole team while looking fine to the person who set it
+    // up. So: resolve `coord` from PATH, with COORD_BIN as the escape hatch
+    // for anyone who keeps it somewhere unusual.
+    let hook_cmd = "${COORD_BIN:-coord} hook".to_string();
     let settings_path = root.join(".claude/settings.json");
     std::fs::create_dir_all(settings_path.parent().unwrap())?;
     let mut settings: Value = std::fs::read_to_string(&settings_path)
@@ -173,7 +198,7 @@ fn init(relay: String, repo: Option<String>) -> Result<()> {
         arr.retain(|g| {
             !g["hooks"]
                 .as_array()
-                .map(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(|c| c.ends_with(" hook"))))
+                .map(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(is_coord_hook)))
                 .unwrap_or(false)
         });
         let mut group = json!({ "hooks": [{ "type": "command", "command": hook_cmd }] });
@@ -188,10 +213,21 @@ fn init(relay: String, repo: Option<String>) -> Result<()> {
     println!("  repo id : {repo_id}");
     println!("  relay   : {relay}");
     println!("  hooks   : {}", settings_path.display());
+    // Say it here rather than letting someone discover it from silence.
+    if which_coord().is_none() {
+        println!(
+            "\nwarning: `coord` is not on PATH. The hooks just written call it by name so they \
+             work for everyone who clones this repo — install the binary on PATH, or set \
+             COORD_BIN to its location."
+        );
+    }
     println!("\nNext steps:");
     println!("  1. start a relay somewhere shared:   coord relay --listen 0.0.0.0:7420");
     println!("  2. start the local daemon:           coord daemon");
     println!("  3. restart Claude Code sessions in this repo — they now coordinate.");
+    println!("  4. commit .coord.toml and .claude/settings.json — teammates who clone are enrolled.");
+    println!("     Each of them needs the binary on PATH, `coord daemon`, and, on a hosted");
+    println!("     relay, `coord login`.");
     Ok(())
 }
 
@@ -269,6 +305,128 @@ fn login(relay: String, token: String) -> Result<()> {
     Ok(())
 }
 
+/// Where `coord` resolves from, if anywhere. `init` writes hooks that call it
+/// by name, so "is it on PATH" is a real question with a real failure mode.
+fn which_coord() -> Option<PathBuf> {
+    if let Ok(explicit) = std::env::var("COORD_BIN") {
+        let p = PathBuf::from(explicit);
+        return p.is_file().then_some(p);
+    }
+    std::env::var("PATH").ok()?.split(':').find_map(|dir| {
+        let p = std::path::Path::new(dir).join("coord");
+        p.is_file().then_some(p)
+    })
+}
+
+/// Every way coord can be silently off, in one place.
+///
+/// Fail-open means a broken coord looks exactly like a working one from
+/// inside an agent: no errors, no blocks, nothing. That is the right
+/// behaviour and it is also why this command has to exist — it is the only
+/// way for a human to tell "nothing collided" from "nothing was watching".
+fn status() -> Result<()> {
+    let mut problems: Vec<String> = Vec::new();
+    let ok = |b: bool| if b { "ok  " } else { "FAIL" };
+
+    // 1. the binary the committed hooks call by name
+    let on_path = which_coord();
+    println!(
+        "[{}] binary    {}",
+        ok(on_path.is_some()),
+        match &on_path {
+            Some(p) => p.display().to_string(),
+            None => "`coord` not found on PATH (set COORD_BIN, or install it there)".into(),
+        }
+    );
+    if on_path.is_none() {
+        problems.push("install coord on PATH, or set COORD_BIN".into());
+    }
+
+    // 2. this repo
+    let root = config::find_repo_root(&std::env::current_dir()?);
+    let cfg = root.as_deref().and_then(config::RepoConfig::load);
+    match (&root, &cfg) {
+        (Some(r), Some(c)) => {
+            println!("[ok  ] repo      {} (id: {})", r.display(), c.repo);
+        }
+        _ => {
+            println!("[FAIL] repo      no .coord.toml here — run `coord init`");
+            problems.push("run `coord init` in this repo".into());
+        }
+    }
+
+    // 3. hooks: installed, and calling something that exists
+    if let Some(r) = &root {
+        let path = r.join(".claude/settings.json");
+        let settings: Option<Value> =
+            std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok());
+        let cmds: Vec<String> = settings
+            .iter()
+            .filter_map(|s| s["hooks"].as_object())
+            .flat_map(|h| h.values())
+            .filter_map(|v| v.as_array())
+            .flatten()
+            .filter_map(|g| g["hooks"].as_array())
+            .flatten()
+            .filter_map(|h| h["command"].as_str())
+            .filter(|c| is_coord_hook(c))
+            .map(str::to_string)
+            .collect();
+        let events = cmds.len();
+        // An absolute path here is the bug that broke every teammate: it
+        // resolves for whoever ran `init` and for nobody else.
+        let absolute: Vec<&String> = cmds.iter().filter(|c| c.starts_with('/')).collect();
+        if events == 0 {
+            println!("[FAIL] hooks     not installed — run `coord init`");
+            problems.push("run `coord init` to install hooks".into());
+        } else if let Some(a) = absolute.first() {
+            println!("[WARN] hooks     {events} events, but hardcoded to a local path:");
+            println!("                 {a}");
+            println!("                 that path will not exist for teammates who clone this repo");
+            problems.push("re-run `coord init` to write a PATH-resolved hook command".into());
+        } else {
+            println!("[ok  ] hooks     {events} events, resolved from PATH");
+        }
+    }
+
+    // 4. the daemon, asked rather than assumed
+    let daemon = cfg.is_some()
+        && root.as_ref().is_some_and(|r| {
+            hook::call_daemon(&DReq::Who { repo_root: r.to_string_lossy().to_string() }).is_some()
+        });
+    println!("[{}] daemon    {}", ok(daemon), if daemon { "responding" } else { "not running — start it with `coord daemon`" });
+    if !daemon {
+        problems.push("start the daemon: coord daemon".into());
+    }
+
+    // 5. the relay, and the token, which fail differently and must read differently
+    if let Some(c) = &cfg {
+        let origin = config::relay_origin(&c.relay);
+        let have_token = config::token_for(&c.relay).is_some();
+        println!(
+            "[{}] relay     {} (token: {})",
+            if daemon { "ok  " } else { "?   " },
+            c.relay,
+            if have_token { "present" } else { "none — fine for an open relay, required for a hosted one" }
+        );
+        if !have_token && !origin.contains("127.0.0.1") && !origin.contains("localhost") {
+            problems.push(format!("if that relay requires auth: coord login --relay {} --token <token>", c.relay));
+        }
+    }
+
+    println!();
+    if problems.is_empty() {
+        println!("coordination is on.");
+    } else {
+        println!("coordination is OFF or partial. Edits are still allowed — coord fails open —");
+        println!("but nothing is being coordinated. To fix:");
+        for p in &problems {
+            println!("  - {p}");
+        }
+    }
+    Ok(())
+}
+
 fn who() -> Result<()> {
     let root = config::find_repo_root(&std::env::current_dir()?)
         .context("no .coord.toml found — run `coord init` first")?;
@@ -299,5 +457,39 @@ fn who() -> Result<()> {
         }
         DResp::Err { msg } => anyhow::bail!(msg),
         _ => anyhow::bail!("unexpected response"),
+    }
+}
+
+
+#[cfg(test)]
+mod init_tests {
+    use super::*;
+
+    /// The bug this guards: `init` used to write `current_exe()`, so the
+    /// committed hook config named a path inside whoever ran it. Every
+    /// teammate's hooks then failed, coord failed open, and coordination was
+    /// silently off for the whole team while looking healthy to one person.
+    #[test]
+    fn a_hook_command_must_not_be_machine_specific() {
+        assert!(!"${COORD_BIN:-coord} hook".contains('/'), "no absolute path may be baked in");
+    }
+
+    #[test]
+    fn our_own_hooks_are_recognised_in_every_form_we_have_shipped() {
+        assert!(is_coord_hook("${COORD_BIN:-coord} hook"), "current form");
+        assert!(is_coord_hook("coord hook"), "bare PATH form");
+        assert!(is_coord_hook("/Users/someone/coord/target/release/coord hook"), "legacy absolute");
+        assert!(is_coord_hook("  coord hook  "), "surrounding whitespace");
+    }
+
+    /// Re-running `init` must repair a stale install, not append a second
+    /// entry, and must never eat somebody else's hook.
+    #[test]
+    fn other_peoples_hooks_are_left_alone() {
+        assert!(!is_coord_hook("prettier --write"));
+        assert!(!is_coord_hook("my-linter hook"));
+        assert!(!is_coord_hook("coordinator hook"), "suffix match must respect the whole name");
+        assert!(!is_coord_hook("coord who"), "only the hook subcommand is ours");
+        assert!(!is_coord_hook("/opt/tools/coordinate hook"));
     }
 }
