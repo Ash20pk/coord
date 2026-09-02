@@ -126,6 +126,11 @@ sqlite3 ~/.coord/relay.db \
   "SELECT seq, datetime(ts/1000,'unixepoch','localtime'), json FROM events ORDER BY seq;"
 ```
 
+## Report
+
+[REPORT.md](REPORT.md) — current state, live-run results, every bug found by
+running real sessions, and known gaps.
+
 ## Status
 
 v1 — shared-tree claims mode. Planned: fleet mode (worktree isolation +
