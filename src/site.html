@@ -3,1208 +3,865 @@
   Served by the relay binary itself (include_str! in src/relay.rs), so there is
   no second service to deploy and no CORS to configure.
 
-  The story is the argument: an agent that cannot see its peers collides with
-  them, and every panel below acts that out rather than asserting it. The 3D
-  diorama is one canvas driven by scroll position — the robots are the same two
-  robots throughout, which is what makes the sequence read as a story.
+  The product is a ledger, so the page is built around one: the hero replays a
+  real trace — two agents, one file — on a lane chart and in the same row
+  format the console shows. Everything else is quiet and set in two columns.
+  Colour is used only for state: green holds, orange is blocked, blue is a
+  message between agents.
 -->
-<title>knoot — agents that know about each other</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>knoot — agents that know who is already there</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@700;800&family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wdth,wght@0,75..100,400..700;1,75..100,400..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 
 <style>
 :root {
-  --ink: #07060f;
-  --ink-2: #0e0c1c;
-  --panel: rgba(255,255,255,.045);
-  --edge: rgba(255,255,255,.13);
-  --text: #f2effa;
-  --dim: #a49dc4;
-  --cyan: #35e8ff;
-  --mag: #ff5cd6;
-  --lime: #c6ff4a;
-  --amber: #ffc44d;
-  --red: #ff5c6f;
-  --display: 'Baloo 2', system-ui, sans-serif;
-  --body: 'Space Grotesk', system-ui, sans-serif;
-  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  --paper: #f1f2ef;
+  --paper-2: #e7e9e5;
+  --ink: #141719;
+  --ink-2: #5a6169;
+  --ink-3: #8a9097;
+  --rule: #c4c9c4;
+  --rule-2: #dcdfdb;
+  --panel: #171c21;
+  --panel-2: #1f252b;
+  --panel-rule: #2b3238;
+  --panel-text: #e8ecef;
+  --panel-dim: #8b949d;
+  --held: #19a974;
+  --blocked: #ff4a1f;
+  --wire: #3b7bff;
+  --sans: 'Instrument Sans', system-ui, sans-serif;
+  --mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 }
 
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
 body {
-  margin: 0;
-  background: var(--ink);
-  color: var(--text);
-  font-family: var(--body);
-  overflow-x: hidden;
-  -webkit-font-smoothing: antialiased;
+  margin: 0; background: var(--paper); color: var(--ink);
+  font-family: var(--sans); font-size: 17px; line-height: 1.5;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  font-feature-settings: 'ss01';
 }
+a { color: inherit; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:hover { text-decoration-color: var(--blocked); }
+code, kbd, pre { font-family: var(--mono); font-size: .92em; }
+:focus-visible { outline: 2px solid var(--wire); outline-offset: 3px; }
+.wrap { width: min(1200px, calc(100vw - 48px)); margin: 0 auto; }
+.grid { display: grid; grid-template-columns: repeat(12, 1fr); column-gap: 24px; }
+.grid > *, .beat > *, .steps li > div, .guar dl > div > * { min-width: 0; }
 
-/* Starfield + aurora, cheap and static so the GPU is free for the diorama. */
-body::before {
-  content: '';
-  position: fixed; inset: 0; z-index: 0; pointer-events: none;
-  background:
-    radial-gradient(900px 600px at 12% -5%, rgba(53,232,255,.16), transparent 70%),
-    radial-gradient(800px 700px at 92% 8%, rgba(255,92,214,.14), transparent 70%),
-    radial-gradient(700px 500px at 50% 105%, rgba(198,255,74,.10), transparent 70%);
-}
+h1, h2, h3 { font-weight: 500; margin: 0; letter-spacing: -.02em; }
+h1 { font-variation-settings: 'wdth' 82; font-size: clamp(44px, 6.1vw, 88px); line-height: .96; text-wrap: balance; }
+h2 { font-variation-settings: 'wdth' 82; font-size: clamp(30px, 3.4vw, 46px); line-height: 1.04; }
+h3 { font-size: 20px; line-height: 1.3; }
+p { margin: 0; }
+.lede { font-size: 18px; line-height: 1.5; color: var(--ink); max-width: 46ch; }
+.muted { color: var(--ink-2); }
+.small { font-size: 15px; }
 
-a { color: var(--cyan); }
-.wrap { width: min(1120px, 92vw); margin: 0 auto; position: relative; z-index: 2; }
-
-/* ---------- chrome ---------- */
-header.nav {
-  position: sticky; top: 0; z-index: 50;
-  backdrop-filter: blur(14px);
-  background: linear-gradient(to bottom, rgba(7,6,15,.92), rgba(7,6,15,.55));
-  border-bottom: 1px solid var(--edge);
-}
-.nav .wrap { display: flex; align-items: center; gap: 18px; padding: 14px 0; }
-.logo {
-  font-family: var(--display); font-weight: 800; font-size: 26px;
-  letter-spacing: -.5px; display: flex; align-items: center; gap: 10px;
-}
-.logo .dot {
-  width: 13px; height: 13px; border-radius: 50%;
-  background: var(--lime); box-shadow: 0 0 16px var(--lime);
-  animation: pulse 2.4s ease-in-out infinite;
-}
-@keyframes pulse { 50% { opacity: .35; transform: scale(.82); } }
-.nav nav { margin-left: auto; display: flex; gap: 22px; align-items: center; }
-.nav nav a { color: var(--dim); text-decoration: none; font-size: 15px; font-weight: 500; }
-.nav nav a:hover { color: var(--text); }
+/* ---------- nav ---------- */
+.nav { position: sticky; top: 0; z-index: 20; background: var(--paper); border-bottom: 1px solid var(--rule); }
+.nav .wrap { display: flex; align-items: center; gap: 28px; height: 60px; }
+.brand { font-weight: 600; font-size: 19px; letter-spacing: -.01em; text-decoration: none; display: flex; align-items: center; gap: 9px; }
+.brand i { width: 9px; height: 9px; background: var(--held); border-radius: 50%; display: inline-block; }
+.nav nav { display: flex; gap: 22px; margin-left: 12px; }
+.nav nav a { text-decoration: none; color: var(--ink-2); font-size: 15px; }
+.nav nav a:hover { color: var(--ink); }
+.nav .cta { margin-left: auto; }
 
 .btn {
-  font-family: var(--body); font-weight: 700; font-size: 15px;
-  border: 0; border-radius: 999px; padding: 11px 22px; cursor: pointer;
-  color: #07060f; background: linear-gradient(100deg, var(--cyan), var(--lime));
-  box-shadow: 0 6px 0 rgba(0,0,0,.45), 0 0 34px rgba(53,232,255,.35);
-  transition: transform .12s ease, box-shadow .12s ease;
-  text-decoration: none; display: inline-block;
+  font: 500 15px/1 var(--sans); color: var(--paper); background: var(--ink);
+  border: 1px solid var(--ink); padding: 12px 18px; border-radius: 3px; cursor: pointer;
+  text-decoration: none; display: inline-flex; align-items: center; gap: 8px;
+  transition: background .12s ease, color .12s ease;
 }
-.btn:hover { transform: translateY(-2px); box-shadow: 0 8px 0 rgba(0,0,0,.45), 0 0 44px rgba(53,232,255,.5); }
-.btn:active { transform: translateY(3px); box-shadow: 0 2px 0 rgba(0,0,0,.45); }
-.btn.ghost {
-  background: transparent; color: var(--text);
-  border: 2px solid var(--edge); box-shadow: none;
-}
-.btn.ghost:hover { border-color: var(--cyan); transform: translateY(-2px); }
+.btn:hover { background: #000; }
+.btn:disabled { opacity: .55; cursor: default; }
+.btn.quiet { background: transparent; color: var(--ink); }
+.btn.quiet:hover { background: var(--paper-2); }
 
 /* ---------- hero ---------- */
-.hero { padding: 52px 0 30px; }
-/* Two columns so the diorama is above the fold: the animation *is* the
-   argument, and an argument below the fold is not made. */
-.hero .wrap { display: grid; grid-template-columns: 1.02fr .98fr; gap: 44px; align-items: center; }
-.hero-copy { min-width: 0; }
-.eyebrow {
-  display: inline-flex; align-items: center; gap: 9px;
-  font-family: var(--mono); font-size: 12.5px; letter-spacing: .14em; text-transform: uppercase;
-  color: var(--cyan); border: 1px solid rgba(53,232,255,.35);
-  padding: 7px 14px; border-radius: 999px; background: rgba(53,232,255,.07);
-}
-h1 {
-  font-family: var(--display); font-weight: 800;
-  font-size: clamp(42px, 7.4vw, 88px); line-height: .96;
-  margin: 22px 0 0; letter-spacing: -1.5px;
-}
-h1 .grad {
-  background: linear-gradient(100deg, var(--cyan), var(--mag) 55%, var(--amber));
-  -webkit-background-clip: text; background-clip: text; color: transparent;
-}
-.sub { font-size: clamp(17px, 2vw, 21px); color: var(--dim); max-width: 60ch; margin: 20px 0 0; line-height: 1.55; }
-.hero-cta { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 32px; align-items: center; }
-.hero-note { font-family: var(--mono); font-size: 12.5px; color: var(--dim); }
+.hero { padding: 56px 0 40px; }
+.hero h1 { grid-column: 1 / 9; }
+.hero .below { grid-column: 9 / 13; align-self: end; display: flex; flex-direction: column; gap: 22px; padding-bottom: 6px; }
+.hero .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.hero .actions .note { color: var(--ink-2); font-size: 14px; flex-basis: 100%; }
 
-/* ---------- the diorama ---------- */
-.stage { position: relative; min-width: 0; }
-#diorama {
-  width: 100%; height: min(58vh, 480px); display: block;
-  border-radius: 26px; border: 1px solid var(--edge);
-  background: linear-gradient(180deg, rgba(20,17,38,.85), rgba(9,8,20,.85));
-  box-shadow: inset 0 0 90px rgba(0,0,0,.6);
+/* ---------- the instrument ---------- */
+.instrument {
+  margin-top: 44px; background: var(--panel); color: var(--panel-text);
+  border-radius: 6px; overflow: hidden; border: 1px solid #0c0f12;
+  display: grid; grid-template-columns: 1fr 340px; grid-template-rows: auto auto;
 }
-.stage-fallback {
-  position: absolute; inset: 0; display: none; place-items: center;
-  font-family: var(--mono); font-size: 13px; color: var(--dim); text-align: center; padding: 30px;
+.instrument .head {
+  grid-column: 1 / -1; display: flex; align-items: center; gap: 18px;
+  padding: 12px 18px; border-bottom: 1px solid var(--panel-rule); font-size: 13.5px; color: var(--panel-dim);
 }
-.stage.no3d .stage-fallback { display: grid; }
+.instrument .head b { color: var(--panel-text); font-weight: 500; }
+.instrument .head .clock { margin-left: auto; font-family: var(--mono); font-size: 13px; color: var(--panel-text); font-variant-numeric: tabular-nums; }
+.instrument .head .clock em { font-style: normal; color: var(--held); }
+.instrument .head button {
+  background: transparent; border: 1px solid var(--panel-rule); color: var(--panel-dim);
+  font: 12.5px var(--sans); padding: 5px 10px; border-radius: 3px; cursor: pointer;
+}
+.instrument .head button:hover { color: var(--panel-text); border-color: var(--panel-dim); }
+.lanes { padding: 18px 18px 8px; position: relative; min-width: 0; }
+.lanes svg { display: block; width: 100%; height: auto; overflow: visible; }
+.lanes text { font-family: var(--mono); font-size: 12px; fill: var(--panel-dim); }
+.lanes .lane-name { fill: var(--panel-text); font-size: 13px; }
+.lanes .bar { rx: 2; }
+.lanes .bar.held { fill: var(--held); }
+.lanes .bar.ghost { fill: #2b3238; }
+.lanes .bar-label { fill: #0c0f12; font-size: 11.5px; font-weight: 500; }
+.lanes .tick { stroke: var(--panel-rule); stroke-width: 1; }
+.lanes .laneline { stroke: var(--panel-rule); stroke-width: 1; stroke-dasharray: 2 4; }
+.lanes .playhead { stroke: var(--panel-text); stroke-width: 1; }
+.lanes .ev { opacity: 0; transition: opacity .25s ease; }
+.lanes .ev.on { opacity: 1; }
+.lanes .deny { fill: var(--blocked); }
+.lanes .msg { stroke: var(--wire); stroke-width: 1.5; fill: none; }
+.lanes .msg-dot { fill: var(--wire); }
+.lanes .freed { fill: var(--panel-text); }
 
-/* Speech bubbles are DOM, positioned from projected 3D coordinates. Cartoon
-   lettering that stays crisp, and readable by a screen reader. */
-.bubbles { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
-.bubble {
-  position: absolute; transform: translate(-50%, -100%);
-  font-family: var(--display); font-weight: 700; font-size: 14px;
-  background: #fff; color: #100e1e; padding: 8px 13px; border-radius: 14px;
-  border: 3px solid #100e1e; white-space: nowrap; max-width: 42vw;
-  opacity: 0; transition: opacity .35s ease;
-  box-shadow: 0 5px 0 rgba(0,0,0,.5);
+.brief {
+  border-left: 1px solid var(--panel-rule); padding: 18px; font-size: 14px; line-height: 1.5;
+  display: flex; flex-direction: column; gap: 10px; min-height: 250px;
 }
-.bubble.show { opacity: 1; }
-.bubble::after {
-  content: ''; position: absolute; left: 22px; bottom: -11px;
-  border: 7px solid transparent; border-top-color: #100e1e;
+.brief .tag { font-family: var(--mono); font-size: 12px; color: var(--panel-dim); display: flex; gap: 10px; }
+.brief .tag b { font-weight: 500; }
+.brief .tag b.held { color: var(--held); } .brief .tag b.blocked { color: var(--blocked); }
+.brief .tag b.wire { color: var(--wire); } .brief .tag b.plain { color: var(--panel-text); }
+.brief h4 { margin: 0; font-size: 17px; font-weight: 500; line-height: 1.3; }
+.brief p { color: #c7cdd2; }
+.brief pre {
+  margin: 4px 0 0; padding: 12px; background: #0f1317; border-radius: 4px; font-size: 12.5px; line-height: 1.55;
+  color: var(--panel-text); white-space: pre-wrap; border: 1px solid var(--panel-rule);
 }
-.bubble.hold { background: var(--lime); }
-.bubble.deny { background: var(--red); color: #fff; }
-.bubble.talk { background: var(--cyan); }
-.bubble.solo { background: var(--amber); }
+.brief pre .o { color: var(--blocked); } .brief pre .g { color: var(--held); } .brief pre .d { color: var(--panel-dim); } .brief pre .w { color: var(--wire); }
 
-.stage-caption {
-  display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
-  margin-top: 16px; min-height: 52px;
+.ledger { grid-column: 1 / -1; border-top: 1px solid var(--panel-rule); font-family: var(--mono); font-size: 12.5px; }
+.ledger .row {
+  display: grid; grid-template-columns: 56px 92px 72px 130px 1fr; gap: 14px; padding: 6px 18px;
+  border-bottom: 1px solid #1d2227; font-variant-numeric: tabular-nums; color: #c7cdd2;
 }
-.stage-caption .tag {
-  font-family: var(--mono); font-size: 11.5px; letter-spacing: .12em;
-  text-transform: uppercase; color: var(--ink); background: var(--lime);
-  padding: 4px 9px; border-radius: 6px; font-weight: 700;
-}
-.stage-caption p { margin: 0; color: var(--dim); font-size: 16px; max-width: 72ch; }
-.stage-caption strong { color: var(--text); }
+.ledger .row.h { color: var(--panel-dim); border-bottom: 1px solid var(--panel-rule); font-family: var(--sans); font-size: 12.5px; }
+.ledger .row:last-child { border-bottom: 0; }
+.ledger .row.enter { animation: rowin .35s ease-out; }
+@keyframes rowin { from { background: #232a30; } to { background: transparent; } }
+.ledger .seq { color: var(--panel-dim); }
+.ledger .k.held { color: var(--held); } .ledger .k.blocked { color: var(--blocked); } .ledger .k.wire { color: var(--wire); }
+.ledger .empty { padding: 14px 18px; color: var(--panel-dim); font-family: var(--sans); font-size: 13.5px; }
 
-/* Scene controls: the diorama plays itself, but a reader who wants to go back
-   to the collision should not have to wait for the loop. */
-.stage-dots { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
-.stage-dots button {
-  width: 30px; height: 6px; border-radius: 99px; border: 0; padding: 0; cursor: pointer;
-  background: rgba(255,255,255,.18); transition: background .25s ease, transform .25s ease;
-}
-.stage-dots button:hover { background: rgba(255,255,255,.4); }
-.stage-dots button[aria-selected="true"] { background: var(--lime); transform: scaleY(1.6); }
-.stage-dots .playing { font-family: var(--mono); font-size: 11px; color: var(--dim); margin-left: 6px; }
+/* ---------- the story: a timeline ---------- */
+.story { padding: 96px 0 20px; }
+.story .intro { grid-column: 1 / 8; margin-bottom: 64px; }
+.story .intro p { margin-top: 18px; }
+.beat { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(12, 1fr); column-gap: 24px; padding: 40px 0; border-top: 1px solid var(--rule); }
+.beat .t { grid-column: 1 / 3; font-family: var(--mono); font-size: 14px; color: var(--ink-2); padding-top: 6px; font-variant-numeric: tabular-nums; }
+.beat .t b { display: block; color: var(--ink); font-weight: 500; font-size: 22px; letter-spacing: -.01em; }
+.beat .t i { display: block; width: 9px; height: 9px; border-radius: 50%; margin-top: 14px; background: var(--rule); }
+.beat .t i.held { background: var(--held); } .beat .t i.blocked { background: var(--blocked); } .beat .t i.wire { background: var(--wire); }
+.beat .body { grid-column: 3 / 8; }
+.beat .body p { margin-top: 14px; color: var(--ink-2); }
+.beat .body p b { color: var(--ink); font-weight: 500; }
+.beat .fig { grid-column: 8 / 13; }
 
-/* ---------- story ---------- */
-.acts { padding: 20px 0 40px; }
-.act {
-  display: grid; grid-template-columns: 1.05fr 1fr; gap: 44px;
-  align-items: center; padding: 62px 0; border-top: 1px solid var(--edge);
+.term {
+  background: var(--panel); color: var(--panel-text); border-radius: 6px; padding: 16px 18px;
+  font-family: var(--mono); font-size: 13px; line-height: 1.6; overflow-x: auto; border: 1px solid #0c0f12;
 }
-.act:first-child { border-top: 0; }
-.act.flip > .art { order: -1; }
-.act-n {
-  font-family: var(--mono); font-size: 12.5px; letter-spacing: .16em;
-  color: var(--mag); text-transform: uppercase;
-}
-.act h2 {
-  font-family: var(--display); font-weight: 800; font-size: clamp(28px, 3.6vw, 42px);
-  line-height: 1.06; margin: 12px 0 14px; letter-spacing: -.7px;
-}
-.act p { color: var(--dim); font-size: 16.5px; line-height: 1.65; margin: 0 0 14px; }
-.act p strong { color: var(--text); font-weight: 700; }
+.term .cap { font-family: var(--sans); font-size: 12.5px; color: var(--panel-dim); margin-bottom: 10px; display: flex; gap: 10px; }
+.term pre { margin: 0; font-size: inherit; }
+.term .o { color: var(--blocked); } .term .g { color: var(--held); } .term .d { color: var(--panel-dim); } .term .w { color: var(--wire); }
 
-/* Cartoon panels: SVG, so the storytelling stays sharp and cheap. */
-.art {
-  border-radius: 22px; border: 1px solid var(--edge); overflow: hidden;
-  background: linear-gradient(180deg, rgba(22,19,42,.9), rgba(10,9,22,.9));
-}
-.art svg { display: block; width: 100%; height: auto; }
-
-.terminal {
-  border-radius: 16px; border: 1px solid var(--edge); overflow: hidden;
-  font-family: var(--mono); font-size: 12.8px; background: #06050d;
-}
-.terminal .bar {
-  display: flex; gap: 7px; align-items: center; padding: 9px 13px;
-  background: rgba(255,255,255,.05); border-bottom: 1px solid var(--edge);
-  color: var(--dim); font-size: 11.5px;
-}
-.terminal .bar i { width: 10px; height: 10px; border-radius: 50%; background: #3a3552; }
-.terminal .bar i:nth-child(1) { background: var(--red); }
-.terminal .bar i:nth-child(2) { background: var(--amber); }
-.terminal .bar i:nth-child(3) { background: var(--lime); }
-.terminal pre { margin: 0; padding: 15px; overflow-x: auto; line-height: 1.62; color: #d8d2f0; }
-.terminal .c { color: var(--cyan); }
-.terminal .g { color: var(--lime); }
-.terminal .r { color: var(--red); }
-.terminal .m { color: var(--mag); }
-.terminal .d { color: #6f6890; }
+.figlist { border-top: 1px solid var(--rule); }
+.figlist div { display: grid; grid-template-columns: 130px 1fr; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--rule); font-size: 15px; }
+.figlist dt { color: var(--ink-2); } .figlist dd { margin: 0; }
+.figlist dd code { color: var(--ink); }
 
 /* ---------- how it works ---------- */
-.how { padding: 70px 0; border-top: 1px solid var(--edge); }
-.section-head { text-align: center; margin-bottom: 42px; }
-.section-head h2 {
-  font-family: var(--display); font-weight: 800; font-size: clamp(30px, 4vw, 46px);
-  margin: 8px 0 12px; letter-spacing: -.8px;
-}
-.section-head p { color: var(--dim); font-size: 17px; max-width: 62ch; margin: 0 auto; }
-.pipe { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
-.node {
-  border: 1px solid var(--edge); border-radius: 18px; padding: 20px;
-  background: var(--panel); position: relative;
-}
-.node .ic { font-size: 30px; line-height: 1; }
-.node h3 { font-family: var(--display); font-weight: 700; font-size: 18px; margin: 12px 0 7px; }
-.node p { color: var(--dim); font-size: 14px; line-height: 1.55; margin: 0; }
-.node code { font-family: var(--mono); font-size: 12px; color: var(--cyan); }
-.node::after {
-  content: '→'; position: absolute; right: -13px; top: 50%; transform: translateY(-50%);
-  color: var(--mag); font-size: 19px; font-weight: 700;
-}
-.node:last-child::after { display: none; }
+.how { padding: 96px 0; border-top: 1px solid var(--rule); }
+.how .intro { grid-column: 1 / 6; }
+.how .intro p { margin-top: 18px; color: var(--ink-2); }
+.how .schematic { grid-column: 6 / 13; }
+.schematic svg { width: 100%; height: auto; display: block; }
+.schematic text { font-family: var(--sans); font-size: 14px; fill: var(--ink); }
+.schematic .sub { font-size: 12.5px; fill: var(--ink-2); }
+.schematic .m { font-family: var(--mono); font-size: 12px; fill: var(--ink-2); }
+.schematic .box { fill: var(--paper); stroke: var(--ink); stroke-width: 1.2; }
+.schematic .box.you { fill: var(--paper-2); }
+.schematic .box.dark { fill: var(--panel); stroke: var(--panel); }
+.schematic .dark-t { fill: var(--panel-text); }
+.schematic .link { stroke: var(--ink); stroke-width: 1.2; fill: none; }
+.schematic .bracket { stroke: var(--ink-3); stroke-width: 1; fill: none; }
+.how .parts { grid-column: 1 / -1; margin-top: 56px; display: grid; grid-template-columns: repeat(4, 1fr); column-gap: 24px; border-top: 1px solid var(--rule); }
+.how .parts div { padding: 20px 0 0; border-top: 2px solid transparent; margin-top: -1px; }
+.how .parts div { border-top-color: var(--ink); }
+.how .parts h3 { font-size: 17px; }
+.how .parts p { margin-top: 8px; color: var(--ink-2); font-size: 15px; }
+.how .parts p code { font-size: 13px; }
 
-.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 40px; }
-.card {
-  border: 1px solid var(--edge); border-radius: 18px; padding: 22px; background: var(--panel);
-}
-.card h3 { font-family: var(--display); font-weight: 700; font-size: 19px; margin: 0 0 9px; }
-.card p { color: var(--dim); font-size: 14.5px; line-height: 1.6; margin: 0; }
-.card .k { font-size: 26px; }
+/* ---------- guarantees ---------- */
+.guar { padding: 96px 0; border-top: 1px solid var(--rule); }
+.guar .intro { grid-column: 1 / 5; }
+.guar .intro p { margin-top: 18px; color: var(--ink-2); }
+.guar dl { grid-column: 5 / 13; margin: 0; }
+.guar dl > div { display: grid; grid-template-columns: 1fr 1.6fr; gap: 24px; padding: 22px 0; border-top: 1px solid var(--rule); }
+.guar dl > div:first-child { border-top: 0; padding-top: 0; }
+.guar dt { font-size: 20px; font-weight: 500; letter-spacing: -.01em; line-height: 1.3; }
+.guar dd { margin: 0; color: var(--ink-2); }
+.guar dd code { color: var(--ink); }
 
 /* ---------- register ---------- */
-.register { padding: 76px 0 90px; border-top: 1px solid var(--edge); }
-.reg-box {
-  border: 1px solid var(--edge); border-radius: 26px; padding: 34px;
-  background: linear-gradient(160deg, rgba(53,232,255,.09), rgba(255,92,214,.07) 60%, transparent);
-  display: grid; grid-template-columns: 1fr 1fr; gap: 34px; align-items: start;
-}
-.reg-box h2 { font-family: var(--display); font-weight: 800; font-size: 32px; margin: 0 0 10px; letter-spacing: -.6px; }
-.reg-box p.lead { color: var(--dim); font-size: 16px; line-height: 1.6; margin: 0 0 18px; }
-.field { display: block; margin-bottom: 14px; }
-.field span {
-  display: block; font-family: var(--mono); font-size: 11.5px; letter-spacing: .1em;
-  text-transform: uppercase; color: var(--dim); margin-bottom: 7px;
-}
+.register { padding: 96px 0 110px; border-top: 1px solid var(--rule); }
+.register .form { grid-column: 1 / 6; }
+.register .form p { margin-top: 18px; color: var(--ink-2); }
+.register .steps { grid-column: 7 / 13; }
+.field { display: block; margin-top: 28px; }
+.field span { display: block; font-size: 14px; color: var(--ink-2); margin-bottom: 8px; }
 .field input {
-  width: 100%; padding: 13px 15px; border-radius: 13px;
-  border: 2px solid var(--edge); background: rgba(0,0,0,.4);
-  color: var(--text); font-family: var(--body); font-size: 16px;
+  width: 100%; padding: 12px 14px; border: 1px solid var(--ink); background: #fff; border-radius: 3px;
+  font: 17px var(--sans); color: var(--ink);
 }
-.field input:focus { outline: none; border-color: var(--cyan); }
-.reg-out { display: none; }
+.field input:focus { outline: 2px solid var(--wire); outline-offset: 1px; border-color: var(--wire); }
+.form .row { display: flex; gap: 10px; margin-top: 14px; align-items: center; }
+.err { color: var(--blocked); font-size: 15px; margin-top: 12px; }
+.reg-out { display: none; margin-top: 24px; }
 .reg-out.show { display: block; }
 .tok {
-  font-family: var(--mono); font-size: 13px; word-break: break-all;
-  background: #06050d; border: 2px dashed var(--lime); border-radius: 13px;
-  padding: 13px; color: var(--lime); margin: 6px 0 4px;
+  font-family: var(--mono); font-size: 14px; word-break: break-all; line-height: 1.5;
+  background: var(--panel); color: var(--panel-text); border-radius: 4px; padding: 14px 16px;
+  border-left: 3px solid var(--blocked);
 }
-.warn {
-  font-family: var(--mono); font-size: 11.5px; color: var(--amber);
-  display: flex; gap: 7px; margin-bottom: 16px;
-}
-.steps { counter-reset: s; margin: 0; padding: 0; list-style: none; }
-.steps li {
-  counter-increment: s; position: relative; padding-left: 34px; margin-bottom: 15px;
-  font-size: 14.5px; color: var(--dim); line-height: 1.55;
-}
-.steps li::before {
-  content: counter(s); position: absolute; left: 0; top: 0;
-  width: 23px; height: 23px; border-radius: 50%; display: grid; place-items: center;
-  background: var(--mag); color: #07060f; font-family: var(--display);
-  font-weight: 700; font-size: 13px;
-}
+.tok-note { font-size: 15px; color: var(--ink-2); margin-top: 10px; }
+.steps ol { margin: 0; padding: 0; list-style: none; counter-reset: s; }
+.steps li { counter-increment: s; display: grid; grid-template-columns: 36px 1fr; gap: 10px; padding: 18px 0; border-top: 1px solid var(--rule); }
+.steps li:first-child { border-top: 0; padding-top: 0; }
+.steps li::before { content: counter(s); font-family: var(--mono); font-size: 14px; color: var(--ink-2); padding-top: 3px; }
+.steps li p { color: var(--ink-2); font-size: 15.5px; }
 .cmd {
-  display: flex; gap: 8px; align-items: center; margin-top: 7px;
-  background: #06050d; border: 1px solid var(--edge); border-radius: 10px; padding: 9px 11px;
+  display: flex; align-items: center; gap: 10px; margin-top: 10px;
+  background: var(--panel); color: var(--panel-text); border-radius: 4px; padding: 10px 12px;
 }
-.cmd code { font-family: var(--mono); font-size: 12.4px; color: var(--cyan); flex: 1; overflow-x: auto; white-space: pre; }
+.cmd code { flex: 1; font-size: 13px; white-space: pre; overflow-x: auto; color: var(--panel-text); }
+.cmd code::-webkit-scrollbar { height: 0; }
 .copy {
-  border: 1px solid var(--edge); background: rgba(255,255,255,.06); color: var(--dim);
-  font-family: var(--mono); font-size: 10.5px; padding: 4px 8px; border-radius: 6px; cursor: pointer;
-  flex-shrink: 0;
+  flex-shrink: 0; background: transparent; border: 1px solid var(--panel-rule); color: var(--panel-dim);
+  font: 12px var(--sans); padding: 4px 9px; border-radius: 3px; cursor: pointer;
 }
-.copy:hover { color: var(--text); border-color: var(--cyan); }
-.err { color: var(--red); font-family: var(--mono); font-size: 13px; margin-top: 10px; }
+.copy:hover { color: var(--panel-text); border-color: var(--panel-dim); }
 
-footer {
-  border-top: 1px solid var(--edge); padding: 34px 0 60px;
-  color: var(--dim); font-size: 14px;
-}
-footer .wrap { display: flex; gap: 20px; flex-wrap: wrap; align-items: center; }
-footer a { color: var(--dim); }
-footer .sp { margin-left: auto; font-family: var(--mono); font-size: 12px; }
+footer { border-top: 1px solid var(--rule); padding: 28px 0 48px; font-size: 14.5px; color: var(--ink-2); }
+footer .wrap { display: flex; gap: 22px; flex-wrap: wrap; align-items: center; }
+footer .relay { margin-left: auto; font-family: var(--mono); font-size: 13px; }
 
 @media (max-width: 1000px) {
-  .hero .wrap { grid-template-columns: 1fr; gap: 30px; }
-  #diorama { height: min(52vh, 400px); }
+  .hero h1 { grid-column: 1 / 9; }
+  .hero h1 { grid-column: 1 / -1; }
+  .hero .below { grid-column: 1 / -1; margin-top: 28px; }
+  .instrument { grid-template-columns: 1fr; }
+  .brief { border-left: 0; border-top: 1px solid var(--panel-rule); min-height: 0; }
+  .story .intro, .how .intro, .how .schematic, .guar .intro, .guar dl, .register .form, .register .steps { grid-column: 1 / -1; }
+  .how .schematic, .guar dl, .register .steps { margin-top: 40px; }
+  .beat .t { grid-column: 1 / -1; display: flex; gap: 12px; align-items: baseline; }
+  .beat .t b { font-size: 18px; } .beat .t i { margin: 0; align-self: center; }
+  .beat .body { grid-column: 1 / -1; margin-top: 14px; }
+  .beat .fig { grid-column: 1 / -1; margin-top: 22px; }
+  .how .parts { grid-template-columns: 1fr 1fr; row-gap: 24px; }
+  .guar dl > div { grid-template-columns: 1fr; gap: 8px; }
+  .nav nav { display: none; }
 }
-@media (max-width: 900px) {
-  .act, .reg-box { grid-template-columns: 1fr; }
-  .act.flip > .art { order: 0; }
-  .pipe, .grid3 { grid-template-columns: 1fr; }
-  .node::after { content: '↓'; right: 50%; top: auto; bottom: -15px; transform: translateX(50%); }
+@media (max-width: 640px) {
+  .wrap { width: calc(100vw - 32px); }
+  .instrument .head { gap: 10px; font-size: 13px; flex-wrap: wrap; }
+  .instrument .head > span:first-child { flex-basis: 100%; }
+  .lanes { overflow-x: auto; }
+  .lanes svg { min-width: 620px; }
+  .brief { min-height: 0; }
+  .ledger .row { grid-template-columns: 44px 80px 1fr; }
+  .ledger .row .p, .ledger .row.h .p, .ledger .row .u { display: none; }
+  .how .parts { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
-  .logo .dot { animation: none; }
+  .ledger .row.enter { animation: none; }
+  .lanes .ev { transition: none; }
 }
 </style>
 
 <header class="nav">
   <div class="wrap">
-    <div class="logo"><span class="dot"></span>knoot</div>
+    <a class="brand" href="/"><i></i>knoot</a>
     <nav>
-      <a href="#story">Story</a>
-      <a href="#how">How</a>
-      <a href="#start">Get a token</a>
+      <a href="#story">What happens</a>
+      <a href="#how">How it works</a>
+      <a href="#guarantees">Guarantees</a>
       <a href="/app">Console</a>
     </nav>
+    <a class="btn cta" href="#start">Get a team token</a>
   </div>
 </header>
 
 <section class="hero">
-  <div class="wrap">
-   <div class="hero-copy">
-    <div class="eyebrow">◆ realtime coordination for coding agents</div>
-    <h1>Your agents are<br><span class="grad">working blind.</span></h1>
-    <p class="sub">
-      Two Claude Code sessions in one repo cannot see each other. They pick the same
-      file, overwrite each other's work, and neither ever finds out why the tests
-      broke. <strong>knoot</strong> gives them a shared nervous system: claims, leases,
-      and a conflict brief delivered straight into the model's context — so the second
-      agent re-plans instead of colliding.
-    </p>
-    <div class="hero-cta">
-      <a class="btn" href="#start">Register a team →</a>
-      <a class="btn ghost" href="#story">Watch it happen</a>
-      <span class="hero-note">no email · no password · one command to enroll</span>
+  <div class="wrap grid">
+    <h1>Every agent in the repo, on the record.</h1>
+    <div class="below">
+      <p class="lede">
+        Two Claude Code sessions in one repository cannot see each other. knoot is a
+        sequenced log they both write to: before an agent edits a file it asks, and
+        if someone else holds that file it is told who, what they are doing, and for
+        how long. It re-plans instead of overwriting them.
+      </p>
+      <div class="actions">
+        <a class="btn" href="#start">Register a team</a>
+        <a class="btn quiet" href="#story">See a collision avoided</a>
+        <span class="note">No email or password. The token is the account.</span>
+      </div>
     </div>
-   </div>
 
-    <div class="stage" id="stage">
-      <canvas id="diorama" aria-label="Animated diagram: two agent robots working on one repository"></canvas>
-      <div class="bubbles" id="bubbles"></div>
-      <div class="stage-fallback">
-        3D scene unavailable in this browser — the story below tells it in full.
+    <div class="instrument" id="instrument" style="grid-column: 1 / -1" aria-label="A replay of two agents coordinating on one file">
+      <div class="head">
+        <span><b>Replay</b> of a real trace: two sessions, one repository</span>
+        <span id="inst-state">playing</span>
+        <span class="clock"><em>●</em> t + <span id="clock">00.0</span>s</span>
+        <button type="button" id="inst-toggle">Pause</button>
+        <button type="button" id="inst-restart">Restart</button>
       </div>
-      <div class="stage-caption">
-        <span class="tag" id="cap-tag">scene 1 / 5</span>
-        <p id="cap-text"><strong>Two agents, one repo.</strong> Both idle, both blind. Neither has any way to know the other exists.</p>
+      <div class="lanes"><svg id="lanes" viewBox="0 0 860 210" role="img" aria-hidden="true"></svg></div>
+      <aside class="brief" id="brief"></aside>
+      <div class="ledger" id="ledger">
+        <div class="row h"><span>seq</span><span>time</span><span class="u">user</span><span>event</span><span class="p">detail</span></div>
+        <div id="ledger-rows"></div>
       </div>
-      <div class="stage-dots" id="dots" role="tablist" aria-label="Story scene"></div>
     </div>
   </div>
 </section>
 
-<section class="acts wrap" id="story">
+<section class="story" id="story">
+  <div class="wrap grid">
+    <div class="intro">
+      <h2>What happens when two agents want the same file</h2>
+      <p class="muted">
+        The replay above is this sequence. Both sessions were given real tasks that
+        overlap on <code>src/auth.js</code>. Without knoot, whoever writes last wins,
+        the other's work is gone, and because the model never saw a failure it
+        reports success. With knoot, this is what the log records.
+      </p>
+    </div>
 
-  <article class="act">
-    <div>
-      <div class="act-n">Act one — the collision</div>
-      <h2>They both grab <code>auth.js</code>.</h2>
-      <p>
-        Agent <strong>ash</strong> starts a long refactor. Thirty seconds later agent
-        <strong>priya</strong> is asked to add a function to the same file. Neither
-        knows the other exists.
-      </p>
-      <p>
-        Whoever writes last wins. The other's work is gone — and because the model
-        never saw a failure, it reports success. <strong>This is the failure mode
-        nobody logs.</strong>
-      </p>
-    </div>
-    <div class="art">
-      <svg viewBox="0 0 460 300" role="img" aria-label="Two cartoon robots pulling the same file in opposite directions until it tears">
-        <defs>
-          <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stop-color="#35e8ff"/><stop offset="1" stop-color="#1f7ea8"/>
-          </linearGradient>
-          <linearGradient id="g2" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stop-color="#ff5cd6"/><stop offset="1" stop-color="#a3308a"/>
-          </linearGradient>
-        </defs>
-        <!-- left robot -->
-        <g>
-          <rect x="26" y="126" width="86" height="94" rx="24" fill="url(#g1)" stroke="#07060f" stroke-width="5"/>
-          <circle cx="69" cy="98" r="34" fill="url(#g1)" stroke="#07060f" stroke-width="5"/>
-          <circle cx="57" cy="95" r="7" fill="#07060f"/><circle cx="82" cy="95" r="7" fill="#07060f"/>
-          <path d="M56 112 q13 10 26 0" stroke="#07060f" stroke-width="4.5" fill="none" stroke-linecap="round"/>
-          <path d="M69 64 v-16" stroke="#07060f" stroke-width="5"/><circle cx="69" cy="43" r="7" fill="#c6ff4a" stroke="#07060f" stroke-width="4"/>
-          <path d="M112 158 h44" stroke="#07060f" stroke-width="11" stroke-linecap="round"/>
-          <text x="69" y="248" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="15" fill="#f2effa">ash</text>
-        </g>
-        <!-- right robot -->
-        <g>
-          <rect x="348" y="126" width="86" height="94" rx="24" fill="url(#g2)" stroke="#07060f" stroke-width="5"/>
-          <circle cx="391" cy="98" r="34" fill="url(#g2)" stroke="#07060f" stroke-width="5"/>
-          <circle cx="379" cy="95" r="7" fill="#07060f"/><circle cx="404" cy="95" r="7" fill="#07060f"/>
-          <path d="M378 114 q13 -10 26 0" stroke="#07060f" stroke-width="4.5" fill="none" stroke-linecap="round"/>
-          <path d="M391 64 v-16" stroke="#07060f" stroke-width="5"/><circle cx="391" cy="43" r="7" fill="#ffc44d" stroke="#07060f" stroke-width="4"/>
-          <path d="M348 158 h-44" stroke="#07060f" stroke-width="11" stroke-linecap="round"/>
-          <text x="391" y="248" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="15" fill="#f2effa">priya</text>
-        </g>
-        <!-- torn file -->
-        <g>
-          <path d="M186 116 h40 l0 92 h-40 z" fill="#fff" stroke="#07060f" stroke-width="5"/>
-          <path d="M234 116 h40 l0 92 h-40 z" fill="#fff" stroke="#07060f" stroke-width="5"/>
-          <path d="M226 116 l10 20 l-10 18 l10 20 l-10 18 l10 16" stroke="#ff5c6f" stroke-width="5" fill="none"/>
-          <text x="230" y="104" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#ff5c6f">auth.js</text>
-          <g stroke="#ffc44d" stroke-width="5" stroke-linecap="round">
-            <path d="M230 62 v-16"/><path d="M198 72 l-11 -13"/><path d="M262 72 l11 -13"/>
-          </g>
-        </g>
-      </svg>
-    </div>
-  </article>
+    <article class="beat">
+      <div class="t"><b>t + 2s</b>ash<i class="held"></i></div>
+      <div class="body">
+        <h3>The first write claims the file</h3>
+        <p>ash starts a long refactor of session handling. Its first edit to <code>src/auth.js</code>
+          acquires a claim on a ten-minute lease. The lease renews while ash keeps working and
+          expires on its own if the session crashes, so <b>nothing can leave the repo wedged</b>.</p>
+        <p>The claim goes into the log with ash's stated intent. That sentence is what the next
+          agent will read.</p>
+      </div>
+      <div class="fig">
+        <dl class="figlist">
+          <div><dt>event</dt><dd><code>claim_acquired</code></dd></div>
+          <div><dt>path</dt><dd><code>src/auth.js</code></dd></div>
+          <div><dt>lease</dt><dd>10 minutes, renewed on every write</dd></div>
+          <div><dt>intent</dt><dd>“Refactor session handling to use short-lived tokens”</dd></div>
+        </dl>
+      </div>
+    </article>
 
-  <article class="act flip">
-    <div>
-      <div class="act-n">Act two — the claim</div>
-      <h2>The second one is <em>told</em>, not blocked in silence.</h2>
-      <p>
-        ash's first write auto-claims the file on a ten-minute lease. When priya's
-        hook fires, the relay answers in single-digit milliseconds — and the denial
-        is written for a model to read, not a human to debug.
-      </p>
-      <p>
-        It carries <strong>who holds the file, what they are doing, when the lease
-        expires, and what to do instead.</strong> That is the whole trick: an agent
-        that knows why it was stopped re-plans. One that just fails, retries.
-      </p>
-    </div>
-    <div class="art">
-      <div class="terminal">
-        <div class="bar"><i></i><i></i><i></i><span>priya — Claude Code</span></div>
+    <article class="beat">
+      <div class="t"><b>t + 31s</b>priya<i class="blocked"></i></div>
+      <div class="body">
+        <h3>The second is told, not silently blocked</h3>
+        <p>priya is asked to add a function to the same file. Her hook checks the local mirror
+          in microseconds, then the relay answers in single-digit milliseconds with a denial
+          <b>written for a model to read</b>: who holds the file, what they are doing, when the
+          lease expires, and what to do instead.</p>
+        <p>An agent that knows why it was stopped re-plans. One that just fails, retries.</p>
+      </div>
+      <div class="fig">
+        <div class="term">
+          <div class="cap">priya’s session, the moment the edit is refused</div>
 <pre><span class="d">&gt; add refreshSession() to auth.js</span>
 
-<span class="r">✗ Edit blocked by knoot</span>
+<span class="o">Edit blocked by knoot.</span>
 
-<span class="c">`src/auth.js`</span> is currently claimed by <span class="g">ash</span>
-<span class="d">(session a1b2c3d4…)</span>
-intent: <span class="m">"Refactor session handling to
-  use short-lived tokens"</span>
-Lease expires in <span class="c">~7m</span>.
+<span class="w">src/auth.js</span> is held by <span class="g">ash</span> <span class="d">(session a1b2c3d4)</span>
+intent: "Refactor session handling to use
+         short-lived tokens"
+lease expires in about 7 minutes.
 
-<span class="d">Do not edit this file now: work on
-something else, or wait — you will be
-told automatically when it is released.
-To coordinate directly, run:</span>
+Do not edit this file now. Work on something
+else, or wait: you will be told when it is
+released. To coordinate directly:
   <span class="g">knoot msg ash "your question"</span>
 
-<span class="d">&gt; I'll take the token store instead, and
-  ping ash about the export contract.</span>
-<span class="g">✓ Edit src/tokens.js</span>
-</pre>
+<span class="d">&gt; I'll take the token store instead and ask
+  ash to keep the exports stable.</span>
+<span class="g">Edit src/tokens.js</span></pre>
+        </div>
       </div>
-    </div>
-  </article>
+    </article>
 
-  <article class="act">
-    <div>
-      <div class="act-n">Act three — they start talking</div>
-      <h2>Blocking isn't multiplayer. Talking is.</h2>
-      <p>
-        A denied agent registers interest. The moment the holder finishes — or
-        crashes, or its lease expires — every waiter is told, <strong>with what the
-        holder was doing.</strong> Delivery rides the <code>Stop</code> hook, so the
-        news arrives the instant an agent tries to end its turn rather than whenever
-        a human next types.
-      </p>
-      <p>
-        And they message each other in their own words. In live runs, four agents on
-        one goal sent <strong>18–28 messages a run</strong>, unprompted: announcing
-        ownership, publishing export contracts, correcting each other when messages
-        crossed.
-      </p>
-    </div>
-    <div class="art">
-      <svg viewBox="0 0 460 300" role="img" aria-label="Robots exchanging speech bubbles about file ownership">
-        <g>
-          <rect x="30" y="150" width="76" height="82" rx="22" fill="#35e8ff" stroke="#07060f" stroke-width="5"/>
-          <circle cx="68" cy="124" r="30" fill="#35e8ff" stroke="#07060f" stroke-width="5"/>
-          <circle cx="57" cy="121" r="6" fill="#07060f"/><circle cx="79" cy="121" r="6" fill="#07060f"/>
-          <path d="M56 137 q12 9 24 0" stroke="#07060f" stroke-width="4" fill="none" stroke-linecap="round"/>
-        </g>
-        <g>
-          <rect x="354" y="150" width="76" height="82" rx="22" fill="#ff5cd6" stroke="#07060f" stroke-width="5"/>
-          <circle cx="392" cy="124" r="30" fill="#ff5cd6" stroke="#07060f" stroke-width="5"/>
-          <circle cx="381" cy="121" r="6" fill="#07060f"/><circle cx="403" cy="121" r="6" fill="#07060f"/>
-          <path d="M380 137 q12 9 24 0" stroke="#07060f" stroke-width="4" fill="none" stroke-linecap="round"/>
-        </g>
-        <g>
-          <rect x="96" y="30" width="196" height="46" rx="16" fill="#fff" stroke="#07060f" stroke-width="5"/>
-          <path d="M124 76 l-6 18 l22 -18 z" fill="#fff" stroke="#07060f" stroke-width="5"/>
-          <text x="194" y="59" text-anchor="middle" font-family="'Baloo 2',sans-serif" font-weight="700" font-size="15" fill="#100e1e">auth.js is yours — exports stable</text>
-        </g>
-        <g>
-          <rect x="168" y="96" width="228" height="46" rx="16" fill="#c6ff4a" stroke="#07060f" stroke-width="5"/>
-          <path d="M360 142 l8 18 l-24 -18 z" fill="#c6ff4a" stroke="#07060f" stroke-width="5"/>
-          <text x="282" y="125" text-anchor="middle" font-family="'Baloo 2',sans-serif" font-weight="700" font-size="15" fill="#100e1e">got it. patch sent, I'll wait on tests</text>
-        </g>
-        <g font-family="'JetBrains Mono',monospace" font-size="14" fill="#f2effa">
-          <text x="68" y="258" text-anchor="middle">ash</text>
-          <text x="392" y="258" text-anchor="middle">priya</text>
-        </g>
-      </svg>
-    </div>
-  </article>
-
-  <article class="act flip">
-    <div>
-      <div class="act-n">Act four — the promise</div>
-      <h2>If knoot dies, nothing stops.</h2>
-      <p>
-        Relay down, daemon dead, network gone, token rejected — every path ends in
-        <strong>allow</strong>. Sessions carry on solo, exactly like today. An
-        operator's auth mistake can never become an outage for the team.
-      </p>
-      <p>
-        Your code never leaves your machine, either. Only <strong>paths and intent
-        strings</strong> cross the wire — never file contents, never diffs.
-      </p>
-      <div class="terminal" style="margin-top:18px">
-        <div class="bar"><i></i><i></i><i></i><span>knoot status</span></div>
-<pre><span class="g">[ok  ]</span> binary    /usr/local/bin/knoot
-<span class="g">[ok  ]</span> repo      ~/project <span class="d">(id: project-4f2a1c)</span>
-<span class="g">[ok  ]</span> hooks     6 events, resolved from PATH
-<span class="g">[ok  ]</span> daemon    responding
-<span class="g">[ok  ]</span> relay     wss://knoot.dev/ws <span class="d">(token: present)</span>
-
-coordination is on.
-</pre>
+    <article class="beat">
+      <div class="t"><b>t + 40s</b>priya<i class="wire"></i></div>
+      <div class="body">
+        <h3>They talk in their own words</h3>
+        <p>Being denied registers interest in the path. When ash releases it, whether by
+          finishing, ending the session, or letting the lease lapse, priya is told, along with
+          what ash was doing. Delivery rides the <code>Stop</code> hook, so the news arrives the
+          instant an agent tries to end its turn rather than when a human next types.</p>
+        <p>Agents also message each other directly. In live runs, four agents on one shared goal
+          sent between 18 and 28 messages a run without being asked to: announcing ownership,
+          publishing export contracts, correcting each other when messages crossed.</p>
       </div>
-    </div>
-    <div class="art">
-      <svg viewBox="0 0 460 300" role="img" aria-label="A robot continuing to work while the relay orb is dark, labelled fail open">
-        <g opacity=".38">
-          <circle cx="230" cy="76" r="40" fill="none" stroke="#6f6890" stroke-width="5" stroke-dasharray="9 9"/>
-          <text x="230" y="83" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="26" fill="#6f6890">✕</text>
-          <text x="230" y="140" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#6f6890">relay unreachable</text>
-        </g>
-        <g>
-          <rect x="120" y="176" width="90" height="86" rx="24" fill="#35e8ff" stroke="#07060f" stroke-width="5"/>
-          <circle cx="165" cy="150" r="31" fill="#35e8ff" stroke="#07060f" stroke-width="5"/>
-          <circle cx="154" cy="147" r="6" fill="#07060f"/><circle cx="177" cy="147" r="6" fill="#07060f"/>
-          <path d="M152 163 q13 10 26 0" stroke="#07060f" stroke-width="4" fill="none" stroke-linecap="round"/>
-        </g>
-        <g>
-          <rect x="248" y="180" width="94" height="76" rx="12" fill="#fff" stroke="#07060f" stroke-width="5"/>
-          <g stroke="#c6ff4a" stroke-width="6" stroke-linecap="round">
-            <path d="M266 202 h56"/><path d="M266 218 h40"/><path d="M266 234 h50"/>
-          </g>
-          <path d="M210 214 h30" stroke="#07060f" stroke-width="10" stroke-linecap="round"/>
-        </g>
-        <g>
-          <rect x="150" y="272" width="170" height="26" rx="13" fill="#c6ff4a" stroke="#07060f" stroke-width="4"/>
-          <text x="235" y="290" text-anchor="middle" font-family="'Baloo 2',sans-serif" font-weight="700" font-size="14" fill="#100e1e">still writing. fail open.</text>
-        </g>
-      </svg>
-    </div>
-  </article>
+      <div class="fig">
+        <div class="term">
+          <div class="cap">what crossed the wire</div>
+<pre><span class="d">t+40  priya → ash</span>   auth.js is yours. I'm in
+                    tokens.js and need
+                    getSession() to keep its
+                    signature.
+<span class="d">t+48  ash → priya</span>   kept. exporting a new
+                    refresh() too, land after
+                    me.
+<span class="d">t+62  knoot → priya</span>  src/auth.js released by
+                    ash: "Refactor session
+                    handling to use short-lived
+                    tokens"</pre>
+        </div>
+      </div>
+    </article>
+
+    <article class="beat">
+      <div class="t"><b>any time</b>relay<i></i></div>
+      <div class="body">
+        <h3>If knoot goes away, nothing stops</h3>
+        <p>Relay down, daemon dead, network gone, token rejected: every path ends in
+          <b>allow</b>. Sessions carry on alone, exactly as they do today. An operator’s
+          mistake cannot become an outage for the team.</p>
+        <p>That also means silence proves nothing, so <code>knoot status</code> is how a
+          person tells a working install from a quiet one.</p>
+      </div>
+      <div class="fig">
+        <div class="term">
+          <div class="cap">knoot status</div>
+<pre><span class="g">ok</span>  binary   /usr/local/bin/knoot
+<span class="g">ok</span>  repo     ~/project <span class="d">(id: project-4f2a1c)</span>
+<span class="g">ok</span>  hooks    6 events, resolved from PATH
+<span class="g">ok</span>  daemon   responding
+<span class="g">ok</span>  relay    wss://knoot.dev/ws <span class="d">(token: present)</span>
+
+coordination is on.</pre>
+        </div>
+      </div>
+    </article>
+  </div>
 </section>
 
 <section class="how" id="how">
-  <div class="wrap">
-    <div class="section-head">
-      <div class="act-n">Under the hood</div>
-      <h2>Four moving parts, one of them yours</h2>
-      <p>
-        Hooks are installed by <code>knoot init</code> and committed to the repo, so
-        anyone who clones it is enrolled. You run a daemon; we run the sequencer.
-      </p>
+  <div class="wrap grid">
+    <div class="intro">
+      <h2>Four parts. You run two of them.</h2>
+      <p>Hooks are installed by <code>knoot init</code> and committed with the repo, so anyone
+        who clones it is enrolled. A daemon on each machine mirrors the claims. The relay
+        sequences everything and arbitrates: knoot.dev, or your own box.</p>
+      <p>Only paths and intent sentences cross the wire. Never file contents, never diffs.</p>
     </div>
-    <div class="pipe">
-      <div class="node">
-        <div class="ic">🤖</div>
-        <h3>Your agents</h3>
-        <p>Any number of Claude Code sessions, in any terminal, on any machine.</p>
-      </div>
-      <div class="node">
-        <div class="ic">🪝</div>
-        <h3>Hooks</h3>
-        <p>Every write, prompt and turn-end calls <code>knoot hook</code>. Bash is parsed for redirects, <code>tee</code>, <code>sed -i</code> too.</p>
-      </div>
-      <div class="node">
-        <div class="ic">⚙️</div>
-        <h3>Local daemon</h3>
-        <p>A claim mirror answering in microseconds, so the hot path never waits on a network.</p>
-      </div>
-      <div class="node">
-        <div class="ic">🛰️</div>
-        <h3>The relay</h3>
-        <p>One sequenced event log per repo. Arbitration, leases, conflict briefs — <code>knoot.dev</code>, or your own box.</p>
-      </div>
+    <div class="schematic" aria-label="Diagram: agents call hooks, hooks call a local daemon over a unix socket, the daemon speaks to the relay over a websocket">
+      <svg viewBox="0 0 640 300">
+        <!-- your machine bracket -->
+        <path class="bracket" d="M12 22 h396 M12 22 v256 h396 v-256"/>
+        <text class="sub" x="18" y="14">your machine</text>
+
+        <!-- agents -->
+        <rect class="box you" x="28" y="52" width="120" height="44"/>
+        <text x="40" y="79">Claude Code</text>
+        <rect class="box you" x="28" y="106" width="120" height="44"/>
+        <text x="40" y="133">Claude Code</text>
+        <rect class="box you" x="28" y="160" width="120" height="44"/>
+        <text x="40" y="187">any agent</text>
+        <text class="sub" x="28" y="236">any terminal</text>
+
+        <!-- hooks -->
+        <path class="link" d="M148 74 h44 M148 128 h44 M148 182 h44"/>
+        <rect class="box" x="192" y="52" width="88" height="152"/>
+        <text x="206" y="120">hooks</text>
+        <text class="m" x="206" y="140">knoot hook</text>
+        <text class="sub" x="192" y="236">per write, prompt,</text>
+        <text class="sub" x="192" y="252">turn end</text>
+
+        <!-- daemon -->
+        <path class="link" d="M280 128 h40"/>
+        <text class="m" x="283" y="118">unix socket</text>
+        <rect class="box" x="320" y="96" width="76" height="64"/>
+        <text x="332" y="124">daemon</text>
+        <text class="sub" x="332" y="142">claim mirror</text>
+        <text class="sub" x="320" y="236">answers in</text>
+        <text class="sub" x="320" y="252">microseconds</text>
+
+        <!-- relay -->
+        <path class="link" d="M396 128 h100" stroke-dasharray="3 3"/>
+        <text class="m" x="410" y="118">websocket</text>
+        <rect class="box dark" x="496" y="80" width="130" height="96" rx="3"/>
+        <text class="dark-t" x="510" y="108">relay</text>
+        <text class="dark-t sub" style="fill:#8b949d" x="510" y="128">sequenced log</text>
+        <text class="dark-t sub" style="fill:#8b949d" x="510" y="144">claims and leases</text>
+        <text class="dark-t sub" style="fill:#8b949d" x="510" y="160">conflict briefs</text>
+        <text class="sub" x="496" y="236">knoot.dev, or</text>
+        <text class="sub" x="496" y="252">knoot relay on any box</text>
+      </svg>
     </div>
 
-    <div class="grid3">
-      <div class="card">
-        <div class="k">⚡</div>
-        <h3>Microseconds, then milliseconds</h3>
-        <p>The mirror answers locally first; only an actual acquisition crosses the wire. Agents never feel it.</p>
+    <div class="parts">
+      <div>
+        <h3>Hot path stays local</h3>
+        <p>The mirror answers first. Only an actual acquisition crosses the wire, in single-digit milliseconds. Agents do not feel it.</p>
       </div>
-      <div class="card">
-        <div class="k">⏳</div>
-        <h3>Nothing can wedge the repo</h3>
-        <p>Ten-minute leases, renewed on activity, expired on crash. A dead session releases its files by itself.</p>
+      <div>
+        <h3>Shell writes are gated too</h3>
+        <p>Redirects, heredocs, <code>tee</code>, <code>sed -i</code>, <code>cp</code>, <code>mv</code> and <code>rm</code> are parsed for their targets and checked like any edit.</p>
       </div>
-      <div class="card">
-        <div class="k">🔍</div>
-        <h3>Detection where prevention ends</h3>
-        <p>What the Bash parser cannot read is allowed but fingerprinted. A write landing on a peer's claim is recorded as <code>UngatedWrite</code>.</p>
+      <div>
+        <h3>What cannot be parsed is audited</h3>
+        <p>Interpreters and build tools are allowed, then the tree is fingerprinted. A write landing on a peer’s claim is recorded as <code>ungated_write</code>.</p>
       </div>
-      <div class="card">
-        <div class="k">🌱</div>
-        <h3>Zero-setup clones</h3>
-        <p><code>.knoot.toml</code> and the hooks are committed. A teammate needs the binary, a daemon, and one <code>knoot login</code>.</p>
-      </div>
-      <div class="card">
-        <div class="k">🔒</div>
-        <h3>Paths, not code</h3>
-        <p>File paths and intent strings are all that leave your machine. Tokens are stored hashed; a database dump hands over nothing that works.</p>
-      </div>
-      <div class="card">
-        <div class="k">📡</div>
-        <h3>Your own relay, any time</h3>
-        <p>It is one binary and one flag: <code>knoot relay --listen 0.0.0.0:7420</code>. knoot.dev is a convenience, never a dependency.</p>
+      <div>
+        <h3>Sessions are told at startup</h3>
+        <p>A new session learns who else is active and where before its first edit, so most collisions are avoided before a claim is ever refused.</p>
       </div>
     </div>
+  </div>
+</section>
+
+<section class="guar" id="guarantees">
+  <div class="wrap grid">
+    <div class="intro">
+      <h2>What the relay promises</h2>
+      <p>Registration is open, which changes what a token is worth. The relay is built for that.</p>
+    </div>
+    <dl>
+      <div>
+        <dt>Fail open, everywhere</dt>
+        <dd>An unreachable relay, a dead daemon or a refused token all resolve to allow. knoot is never the reason an agent cannot write.</dd>
+      </div>
+      <div>
+        <dt>Tokens are stored as hashes</dt>
+        <dd>A database dump hands over nothing that works. An existing token can never be shown again, only replaced. Mint one per machine so revoking one costs nothing else.</dd>
+      </div>
+      <div>
+        <dt>Teams cannot see each other</dt>
+        <dd>Every repo is namespaced by team at both places a repo is named. Two teams can each have a repo called <code>api</code> and neither can read the other’s log. The test suite asserts this through the HTTP surface.</dd>
+      </div>
+      <div>
+        <dt>Code never leaves your machine</dt>
+        <dd>The relay sees file paths and the intent sentence an agent declared. It does not see contents, diffs or prompts.</dd>
+      </div>
+      <div>
+        <dt>The log survives</dt>
+        <dd>Write-ahead logging, nightly snapshots on the box, and continuous off-box replication once credentials exist. A backup that silently does nothing is announced loudly instead.</dd>
+      </div>
+      <div>
+        <dt>You cannot lock yourself out</dt>
+        <dd>The last live token of a team cannot be revoked, because there is no recovery path and nobody to ask.</dd>
+      </div>
+    </dl>
   </div>
 </section>
 
 <section class="register" id="start">
-  <div class="wrap">
-    <div class="reg-box">
-      <div>
-        <h2>Register a team</h2>
-        <p class="lead">
-          A name is all we ask for. No email, no password, nothing to reset — the
-          token <em>is</em> the account, and it is shown to you exactly once.
-        </p>
-        <form id="reg-form">
-          <label class="field">
-            <span>Team name</span>
-            <input id="team-name" maxlength="60" placeholder="e.g. Platform Squad" autocomplete="organization" required>
-          </label>
-          <button class="btn" type="submit" id="reg-btn">Get our token →</button>
-          <div class="err" id="reg-err" hidden></div>
-        </form>
-        <div class="reg-out" id="reg-out">
-          <div class="warn">▲ copy this now — it is not stored anywhere in a readable form</div>
-          <div class="tok" id="reg-token"></div>
-          <a class="btn ghost" id="reg-console" href="/app" style="margin-top:10px">Open the console →</a>
+  <div class="wrap grid">
+    <div class="form">
+      <h2>Register a team</h2>
+      <p>A name is all it takes. The token is shown exactly once, so copy it somewhere safe before you leave this page.</p>
+      <form id="reg-form">
+        <label class="field">
+          <span>Team name</span>
+          <input id="team-name" maxlength="60" placeholder="Platform team" autocomplete="organization" required>
+        </label>
+        <div class="row">
+          <button class="btn" type="submit" id="reg-btn">Create team and mint a token</button>
         </div>
+        <div class="err" id="reg-err" hidden></div>
+      </form>
+      <div class="reg-out" id="reg-out">
+        <div class="tok" id="reg-token"></div>
+        <p class="tok-note">This is the only time this token is readable. It is stored hashed. The commands on the right now include it.</p>
+        <div class="row"><a class="btn" id="reg-console" href="/app">Open the console</a></div>
       </div>
-      <div>
-        <ol class="steps">
-          <li>
-            Install the binary on every machine that runs agents.
-            <div class="cmd"><code>cargo install --git https://github.com/Ash20pk/knoot</code><button class="copy" type="button">copy</button></div>
-          </li>
-          <li>
-            Enrol the repo once. Commit what it writes — teammates who clone are enrolled with no setup.
-            <div class="cmd"><code id="cmd-init">knoot init --relay wss://knoot.dev/ws</code><button class="copy" type="button">copy</button></div>
-          </li>
-          <li>
-            Each teammate stores the team token once, then runs a daemon.
-            <div class="cmd"><code id="cmd-login">knoot login --relay wss://knoot.dev/ws --token &lt;token&gt;</code><button class="copy" type="button">copy</button></div>
-            <div class="cmd"><code>knoot daemon</code><button class="copy" type="button">copy</button></div>
-          </li>
-          <li>
-            Confirm it is actually on — it fails open, so a broken install looks exactly like a quiet one.
-            <div class="cmd"><code>knoot status</code><button class="copy" type="button">copy</button></div>
-          </li>
-        </ol>
-      </div>
+    </div>
+    <div class="steps">
+      <ol>
+        <li>
+          <div>
+            <p>Install the binary on every machine that runs agents.</p>
+            <div class="cmd"><code>cargo install --git https://github.com/Ash20pk/knoot</code><button class="copy" type="button">Copy</button></div>
+          </div>
+        </li>
+        <li>
+          <div>
+            <p>Enrol the repository once and commit the files it writes. Anyone who clones is enrolled with no setup.</p>
+            <div class="cmd"><code id="cmd-init">knoot init --relay wss://knoot.dev/ws</code><button class="copy" type="button">Copy</button></div>
+          </div>
+        </li>
+        <li>
+          <div>
+            <p>Each teammate stores the team token once, then runs the daemon.</p>
+            <div class="cmd"><code id="cmd-login">knoot login --relay wss://knoot.dev/ws --token &lt;token&gt;</code><button class="copy" type="button">Copy</button></div>
+            <div class="cmd"><code>knoot daemon</code><button class="copy" type="button">Copy</button></div>
+          </div>
+        </li>
+        <li>
+          <div>
+            <p>Confirm it is on. knoot fails open, so a broken install looks like a quiet one from inside an agent.</p>
+            <div class="cmd"><code>knoot status</code><button class="copy" type="button">Copy</button></div>
+          </div>
+        </li>
+      </ol>
     </div>
   </div>
 </section>
 
 <footer>
   <div class="wrap">
-    <div class="logo" style="font-size:20px"><span class="dot"></span>knoot</div>
-    <a href="https://github.com/Ash20pk/knoot">GitHub</a>
+    <a class="brand" href="/"><i></i>knoot</a>
+    <a href="https://github.com/Ash20pk/knoot">Source on GitHub</a>
     <a href="/app">Console</a>
     <a href="/ops">Operator view</a>
-    <span class="sp" id="relay-line">relay: —</span>
+    <span class="relay" id="relay-line"></span>
   </div>
 </footer>
 
 <script>
 'use strict';
-
-/* ------------------------------------------------------------------ *
- * Small helpers
- * ------------------------------------------------------------------ */
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-// Whatever host served this page is the relay: no hardcoded domain, so this
-// same page works on knoot.dev, on a preview box, and on localhost.
+// Whatever host served this page is the relay: the same page works on
+// knoot.dev, a preview box, and localhost.
 const WS_SCHEME = location.protocol === 'https:' ? 'wss' : 'ws';
 const RELAY_WS = `${WS_SCHEME}://${location.host}/ws`;
-$('#relay-line').textContent = `relay: ${RELAY_WS}`;
+$('#relay-line').textContent = `relay ${RELAY_WS}`;
 $('#cmd-init').textContent = `knoot init --relay ${RELAY_WS}`;
 $('#cmd-login').textContent = `knoot login --relay ${RELAY_WS} --token <token>`;
 
-document.querySelectorAll('.copy').forEach((b) => {
-  b.addEventListener('click', () => {
-    const code = b.parentElement.querySelector('code').textContent;
-    navigator.clipboard?.writeText(code).then(() => {
-      const was = b.textContent;
-      b.textContent = 'copied';
-      setTimeout(() => { b.textContent = was; }, 1200);
-    }, () => { b.textContent = 'copy failed'; });
-  });
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('.copy');
+  if (!b) return;
+  const code = b.parentElement.querySelector('code').textContent;
+  navigator.clipboard?.writeText(code).then(() => {
+    b.textContent = 'Copied';
+    setTimeout(() => { b.textContent = 'Copy'; }, 1400);
+  }, () => { b.textContent = 'Copy failed'; });
 });
 
-/* ------------------------------------------------------------------ *
- * Registration
- * ------------------------------------------------------------------ */
+/* ---- registration ---- */
 $('#reg-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = $('#reg-btn'), err = $('#reg-err');
   const team = $('#team-name').value.trim();
   if (!team) return;
-  btn.disabled = true; btn.textContent = 'minting…'; err.hidden = true;
+  btn.disabled = true; btn.textContent = 'Minting'; err.hidden = true;
   try {
     const r = await fetch('/api/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ team }),
     });
     const j = await r.json();
-    if (!r.ok) throw new Error(j.error || `registration failed (${r.status})`);
+    if (!r.ok) throw new Error(j.error || `Registration failed (${r.status})`);
     $('#reg-token').textContent = j.token;
     $('#cmd-login').textContent = `knoot login --relay ${RELAY_WS} --token ${j.token}`;
     $('#reg-console').href = `/app?token=${encodeURIComponent(j.token)}`;
     $('#reg-out').classList.add('show');
     $('#reg-form').style.display = 'none';
-    // Handing the console the token in the URL is the difference between
-    // "here is a secret, good luck" and being already signed in.
     try { localStorage.setItem('knoot.token', j.token); } catch (_) {}
   } catch (ex) {
-    err.textContent = ex.message;
-    err.hidden = false;
+    err.textContent = ex.message; err.hidden = false;
   } finally {
-    btn.disabled = false; btn.textContent = 'Get our token →';
+    btn.disabled = false; btn.textContent = 'Create team and mint a token';
   }
 });
 
-/* ------------------------------------------------------------------ *
- * The diorama: one toon-shaded scene, scrubbed by scroll position.
- *
- * Five scenes, same two robots throughout — the continuity is what makes it
- * read as a story rather than five diagrams. Everything is lerped toward a
- * per-scene target so scrubbing backwards looks deliberate.
- * ------------------------------------------------------------------ */
-(function diorama() {
-  const stage = $('#stage'), canvas = $('#diorama'), bubbleLayer = $('#bubbles');
+/* ---- the instrument: a replayed trace ----------------------------------
+ * One scripted trace, played on a clock. The lane chart and the ledger are
+ * two views of the same events, which is the point: the console shows the
+ * ledger for real, and the chart is how to read it. */
+(function instrument() {
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const SPAN = 90;          // seconds of trace on screen
+  const RATE = reduced ? 0 : 6;     // trace seconds per real second
+  const HOLD = 4;           // real seconds to hold at the end before looping
 
-  if (typeof THREE === 'undefined') { stage.classList.add('no3d'); return; }
-
-  const SCENES = [
-    { tag: 'scene 1', text: '<strong>Two agents, one repo.</strong> Both idle, both blind. Neither has any way to know the other exists.' },
-    { tag: 'scene 2', text: '<strong>The collision.</strong> They reach for the same file. Whoever writes last wins, and nobody is told anything.' },
-    { tag: 'scene 3', text: '<strong>The claim.</strong> ash holds <code>auth.js</code> on a lease. priya is handed a conflict brief — holder, intent, expiry — and re-plans.' },
-    { tag: 'scene 4', text: '<strong>They talk.</strong> Ownership announced, export contracts published, patches offered. The collision is avoided before the block.' },
-    { tag: 'scene 5', text: '<strong>Fail open.</strong> The relay vanishes and both keep working. knoot is never the reason an agent cannot write.' },
+  const TRACE = [
+    { t: 0.0, seq: 1041, user: 'ash',   type: 'session_started', k: 'plain', detail: 'joined on main',
+      title: 'ash joins', body: 'A session announces itself. It is told who else is active and what they hold: nobody, yet.' },
+    { t: 0.6, seq: 1042, user: 'ash',   type: 'intent_declared', k: 'plain', detail: '"Refactor session handling to use short-lived tokens"',
+      title: 'ash declares intent', body: 'The first prompt of a turn is summarised into a sentence. This sentence is what a blocked peer will be shown.' },
+    { t: 2.0, seq: 1043, user: 'ash',   type: 'claim_acquired',  k: 'held', detail: 'src/auth.js',
+      title: 'ash claims src/auth.js', body: 'The first write to a file claims it on a ten-minute lease, renewed on activity.' , lane: 0, bar: { from: 2, to: 62, label: 'src/auth.js' } },
+    { t: 9.0, seq: 1044, user: 'ash',   type: 'file_written',    k: 'plain', detail: 'src/auth.js' },
+    { t: 24.0, seq: 1045, user: 'priya', type: 'session_started', k: 'plain', detail: 'joined on main',
+      title: 'priya joins', body: 'Her startup context already lists ash, ash’s intent, and the one file ash holds.' },
+    { t: 25.0, seq: 1046, user: 'priya', type: 'intent_declared', k: 'plain', detail: '"Add refreshSession() to auth"' },
+    { t: 31.0, seq: 1047, user: 'priya', type: 'claim_denied',   k: 'blocked', detail: 'src/auth.js, held by ash', lane: 1, deny: 31,
+      title: 'priya is refused src/auth.js', body: 'The relay answers in milliseconds with a brief written for a model.',
+      pre: `<span class="o">Edit blocked by knoot.</span>
+<span class="w">src/auth.js</span> is held by <span class="g">ash</span>
+intent: "Refactor session handling to
+         use short-lived tokens"
+lease expires in about 7 minutes.
+<span class="d">Work on something else, or wait: you
+will be told when it is released.</span>` },
+    { t: 36.0, seq: 1048, user: 'priya', type: 'claim_acquired', k: 'held', detail: 'src/tokens.js', lane: 1, bar: { from: 36, to: 84, label: 'src/tokens.js' },
+      title: 'priya re-plans', body: 'She takes the token store instead. No human intervened; the brief was enough.' },
+    { t: 40.0, seq: 1049, user: 'priya', type: 'message',        k: 'wire', detail: 'to ash: "auth.js is yours. keep getSession() stable"', msg: { t: 40, from: 1, to: 0 },
+      title: 'priya messages ash', body: 'Agents coordinate in their own words. This one publishes an interface contract.' },
+    { t: 48.0, seq: 1050, user: 'ash',   type: 'message',        k: 'wire', detail: 'to priya: "kept. exporting refresh() too"', msg: { t: 48, from: 0, to: 1 } },
+    { t: 55.0, seq: 1051, user: 'ash',   type: 'file_written',   k: 'plain', detail: 'src/auth.js' },
+    { t: 62.0, seq: 1052, user: 'ash',   type: 'claim_released', k: 'plain', detail: 'src/auth.js', lane: 0, freed: 62,
+      title: 'ash releases src/auth.js', body: 'ash finishes. Every session that was refused this path is told, with what ash was doing.' },
+    { t: 62.4, seq: 1053, user: 'knoot', type: 'path_freed',     k: 'wire', detail: 'src/auth.js released by ash, delivered to priya',
+      title: 'priya is notified', body: 'Delivered through the Stop hook, so it lands the moment priya tries to end her turn.' },
+    { t: 71.0, seq: 1054, user: 'priya', type: 'claim_acquired', k: 'held', detail: 'src/auth.js', lane: 1, bar: { from: 71, to: 90, label: 'src/auth.js', open: true },
+      title: 'priya takes src/auth.js', body: 'Now she adds refreshSession() on top of ash’s finished refactor, not underneath it.' },
+    { t: 84.0, seq: 1055, user: 'priya', type: 'claim_released', k: 'plain', detail: 'src/tokens.js', lane: 1, freed: 84 },
   ];
 
-  let renderer;
-  try {
-    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-  } catch (_) { stage.classList.add('no3d'); return; }
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  const svg = $('#lanes'), rowsEl = $('#ledger-rows'), brief = $('#brief'), clock = $('#clock');
+  const W = 860, L = 70, R = 12, TOP = 30, LANE_H = 64, LANES = ['ash', 'priya'];
+  const x = (t) => L + (t / SPAN) * (W - L - R);
+  const y = (lane) => TOP + lane * LANE_H + LANE_H / 2;
+  const NS = 'http://www.w3.org/2000/svg';
+  const el = (tag, attrs, text) => {
+    const n = document.createElementNS(NS, tag);
+    for (const k in attrs) n.setAttribute(k, attrs[k]);
+    if (text != null) n.textContent = text;
+    return n;
+  };
 
-  const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(42, 2, 0.1, 100);
-  camera.position.set(0, 1.3, 14.5);
-
-  // Toon shading needs a stepped ramp; four bands reads as cartoon cel shading.
-  const ramp = (() => {
-    const d = new Uint8Array([80, 80, 150, 150, 220, 220, 255, 255]);
-    const t = new THREE.DataTexture(d, d.length, 1, THREE.LuminanceFormat);
-    t.minFilter = t.magFilter = THREE.NearestFilter;
-    t.needsUpdate = true;
-    return t;
-  })();
-
-  scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-  const key = new THREE.DirectionalLight(0xffffff, 1.15);
-  key.position.set(4, 7, 6); scene.add(key);
-  const rim = new THREE.DirectionalLight(0xff5cd6, 0.5);
-  rim.position.set(-6, 2, -4); scene.add(rim);
-
-  const toon = (color) => new THREE.MeshToonMaterial({ color, gradientMap: ramp });
-  const INK = new THREE.MeshBasicMaterial({ color: 0x07060f, side: THREE.BackSide });
-
-  /** Cartoon outline: the same geometry, inflated, drawn back-faces-only. */
-  function outlined(geo, color, thickness = 1.14) {
-    const g = new THREE.Group();
-    g.add(new THREE.Mesh(geo, toon(color)));
-    const shell = new THREE.Mesh(geo, INK);
-    shell.scale.setScalar(thickness);
-    g.add(shell);
-    return g;
+  // Static scaffolding: ticks, lane lines, names.
+  for (let s = 0; s <= SPAN; s += 15) {
+    svg.appendChild(el('line', { class: 'tick', x1: x(s), x2: x(s), y1: TOP - 8, y2: TOP + LANE_H * LANES.length }));
+    svg.appendChild(el('text', { x: x(s), y: TOP + LANE_H * LANES.length + 18, 'text-anchor': s === 0 ? 'start' : 'middle' }, s === 0 ? '0s' : `${s}s`));
   }
-
-  /** One robot: chunky body, big eyes, an antenna with a status bulb. */
-  function robot(color) {
-    const g = new THREE.Group();
-    // A scaled sphere rather than a capsule: r128 has no CapsuleGeometry, and
-    // a bean-shaped body is more cartoon anyway. Scaling the geometry (not the
-    // mesh) keeps it a single geometry, which the outline trick needs.
-    const bodyGeo = new THREE.SphereGeometry(0.7, 24, 18);
-    bodyGeo.scale(0.95, 1.22, 0.9);
-    const body = outlined(bodyGeo, color, 1.1);
-    body.position.y = 0.4; g.add(body);
-
-    const head = outlined(new THREE.SphereGeometry(0.62, 26, 20), color, 1.13);
-    head.position.y = 1.62; g.add(head);
-    g.userData.head = head;
-
-    const eyeGeo = new THREE.SphereGeometry(0.15, 14, 12);
-    const eyeMat = new THREE.MeshBasicMaterial({ color: 0x07060f });
-    for (const x of [-0.23, 0.23]) {
-      const e = new THREE.Mesh(eyeGeo, eyeMat);
-      e.position.set(x, 1.7, 0.53);
-      g.add(e);
-    }
-    // A white glint is the whole difference between cute and dead-eyed.
-    for (const x of [-0.19, 0.27]) {
-      const s = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 8),
-        new THREE.MeshBasicMaterial({ color: 0xffffff }));
-      s.position.set(x, 1.78, 0.64);
-      g.add(s);
-    }
-
-    const arm = outlined(new THREE.CylinderGeometry(0.14, 0.14, 0.78, 12), color, 1.3);
-    arm.rotation.z = Math.PI / 2;
-    arm.position.set(0.85, 0.6, 0.15);
-    g.add(arm); g.userData.arm = arm;
-
-    // A smile, as a torus arc: cheap, and the difference between a character
-    // and a stack of spheres.
-    const mouth = new THREE.Mesh(
-      new THREE.TorusGeometry(0.19, 0.035, 8, 16, Math.PI),
-      new THREE.MeshBasicMaterial({ color: 0x07060f }));
-    mouth.position.set(0, 1.5, 0.5);
-    mouth.rotation.z = Math.PI;
-    g.add(mouth);
-    g.userData.mouth = mouth;
-
-    const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.5, 8),
-      new THREE.MeshBasicMaterial({ color: 0x07060f }));
-    ant.position.y = 2.4; g.add(ant);
-    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.14, 12, 10),
-      new THREE.MeshBasicMaterial({ color: 0xc6ff4a }));
-    bulb.position.y = 2.7; g.add(bulb);
-    g.userData.bulb = bulb;
-
-    return g;
-  }
-
-  const ash = robot(0x35e8ff);
-  ash.position.set(-2.9, -1.15, 0);
-  ash.rotation.y = 0.42;
-  scene.add(ash);
-
-  const priya = robot(0xff5cd6);
-  priya.position.set(2.9, -1.15, 0);
-  priya.rotation.y = -0.42;
-  scene.add(priya);
-
-  // The contested file, and the repo it lives in.
-  const fileGeo = new THREE.BoxGeometry(1.5, 1.9, 0.14);
-  const file = new THREE.Group();
-  const sheet = new THREE.Mesh(fileGeo, toon(0xffffff));
-  file.add(sheet);
-  const fileInk = new THREE.Mesh(fileGeo, INK);
-  fileInk.scale.set(1.09, 1.07, 1.02);
-  file.add(fileInk);
-  for (let i = 0; i < 3; i++) {
-    const line = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.1, 0.03),
-      new THREE.MeshBasicMaterial({ color: 0x35e8ff }));
-    line.position.set(-0.1, 0.32 - i * 0.34, 0.1);
-    file.add(line);
-  }
-  // Label drawn to a canvas and used as a texture: the contested file has a
-  // name in every other panel on this page, so it needs one here too.
-  const label = (() => {
-    const c = document.createElement('canvas');
-    c.width = 256; c.height = 64;
-    const x = c.getContext('2d');
-    x.fillStyle = '#07060f';
-    x.font = 'bold 40px "JetBrains Mono", monospace';
-    x.textAlign = 'center'; x.textBaseline = 'middle';
-    x.fillText('auth.js', 128, 34);
-    const t = new THREE.CanvasTexture(c);
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 0.29),
-      new THREE.MeshBasicMaterial({ map: t, transparent: true }));
-    m.position.set(0, 0.72, 0.11);
-    return m;
-  })();
-  file.add(label);
-
-  file.position.set(0, 0.1, 0);
-  scene.add(file);
-
-  // The repo behind it: a few more cards, dimmer and further back, so the one
-  // they are fighting over is visibly part of something bigger.
-  const backdrop = new THREE.Group();
-  // Far out at the edges of the frame: any closer and they read as debris
-  // floating in front of the cast rather than as the rest of the repo. At this
-  // depth the visible frame is ~40 units wide, so these numbers are large.
-  for (const [x, y, z, r] of [
-    [-15, 2.2, -9, -0.28], [15.5, 3.4, -9.5, 0.32], [-12, -4.2, -8.5, 0.14],
-    [13.5, -5, -9, -0.2], [-17.5, 6.5, -10, 0.08], [16.5, -1.2, -10, 0.22],
-  ]) {
-    const card = outlined(new THREE.BoxGeometry(1.6, 2, 0.1), 0x2a2549, 1.05);
-    card.position.set(x, y, z);
-    card.rotation.z = r;
-    backdrop.add(card);
-  }
-  scene.add(backdrop);
-
-  // A puddle of light under each robot, so they read as standing somewhere.
-  function pad(x) {
-    const p = new THREE.Mesh(new THREE.CircleGeometry(1.05, 32),
-      new THREE.MeshBasicMaterial({ color: 0x35e8ff, transparent: true, opacity: 0.09 }));
-    p.rotation.x = -Math.PI / 2;
-    p.position.set(x, -2.25, 0);
-    return p;
-  }
-  const padA = pad(-2.9), padB = pad(2.9);
-  padB.material = padB.material.clone();
-  padB.material.color.setHex(0xff5cd6);
-  scene.add(padA); scene.add(padB);
-  const sheetMat = sheet.material;
-
-  // The lease: a ring that closes around the file when it is claimed.
-  const lease = new THREE.Mesh(
-    new THREE.TorusGeometry(1.5, 0.075, 10, 44),
-    new THREE.MeshBasicMaterial({ color: 0xc6ff4a, transparent: true, opacity: 0 }));
-  lease.position.copy(file.position);
-  scene.add(lease);
-
-  // The relay, above it all, with a halo that dims when it dies.
-  const relay = outlined(new THREE.IcosahedronGeometry(0.62, 1), 0x8b7bff, 1.13);
-  relay.position.set(0, 3.7, -1.4);
-  scene.add(relay);
-  const halo = new THREE.Mesh(new THREE.RingGeometry(0.9, 1.02, 36),
-    new THREE.MeshBasicMaterial({ color: 0x8b7bff, transparent: true, opacity: 0.65, side: THREE.DoubleSide }));
-  halo.position.copy(relay.position);
-  scene.add(halo);
-
-  // A message that flies between the two robots in scene 4.
-  const msg = new THREE.Mesh(new THREE.SphereGeometry(0.2, 14, 12),
-    new THREE.MeshBasicMaterial({ color: 0x35e8ff, transparent: true, opacity: 0 }));
-  scene.add(msg);
-
-  // Spark burst for the collision.
-  const sparks = new THREE.Group();
-  for (let i = 0; i < 14; i++) {
-    const s = new THREE.Mesh(new THREE.TetrahedronGeometry(0.14),
-      new THREE.MeshBasicMaterial({ color: i % 2 ? 0xffc44d : 0xff5c6f, transparent: true }));
-    const a = (i / 14) * Math.PI * 2;
-    s.userData.dir = new THREE.Vector3(Math.cos(a), Math.sin(a) * 0.8, Math.sin(a) * 0.4);
-    sparks.add(s);
-  }
-  sparks.position.copy(file.position);
-  sparks.visible = false;
-  scene.add(sparks);
-
-  /* --- speech bubbles, anchored to projected 3D positions --- */
-  const BUBBLES = [
-    { id: 'b-ash', cls: 'hold', text: 'refactoring auth.js…', anchor: ash, scenes: [2, 3] },
-    { id: 'b-deny', cls: 'deny', text: 'held by ash — I\'ll take tokens.js', anchor: priya, scenes: [2] },
-    { id: 'b-talk', cls: 'talk', text: 'exports are stable, patch sent', anchor: priya, scenes: [3] },
-    { id: 'b-crash', cls: 'deny', text: '💥 both wrote. one lost.', anchor: file, scenes: [1] },
-    { id: 'b-solo', cls: 'solo', text: 'relay gone — still writing', anchor: ash, scenes: [4] },
-  ];
-  for (const b of BUBBLES) {
-    const el = document.createElement('div');
-    el.className = `bubble ${b.cls}`;
-    el.id = b.id;
-    el.textContent = b.text;
-    bubbleLayer.appendChild(el);
-    b.el = el;
-  }
-
-  /* --- scene targets --- */
-  const T = { ashX: -2.9, priyaX: 2.9, ashReach: 0, priyaReach: 0, lease: 0,
-              relayY: 3.7, relayOn: 1, fileTint: 0xffffff, spin: 1, msg: 0 };
-  let scene_i = 0, sceneT = 0;
-
-  function targetsFor(i) {
-    switch (i) {
-      case 0: return { ashX: -2.9, priyaX: 2.9, ashReach: 0, priyaReach: 0, lease: 0, relayOn: 1, relayY: 3.7, spin: 1, msg: 0 };
-      case 1: return { ashX: -1.75, priyaX: 1.75, ashReach: 1, priyaReach: 1, lease: 0, relayOn: 0.25, relayY: 4.1, spin: 3, msg: 0 };
-      case 2: return { ashX: -1.85, priyaX: 2.95, ashReach: 1, priyaReach: 0, lease: 1, relayOn: 1, relayY: 3.7, spin: 1, msg: 0 };
-      case 3: return { ashX: -2.5, priyaX: 2.5, ashReach: 0, priyaReach: 0, lease: 1, relayOn: 1, relayY: 3.7, spin: 1, msg: 1 };
-      default: return { ashX: -2.35, priyaX: 2.35, ashReach: 1, priyaReach: 1, lease: 0, relayOn: 0, relayY: 5.2, spin: 1.6, msg: 0 };
-    }
-  }
-
-  function setScene(i) {
-    if (i === scene_i) return;
-    scene_i = i;
-    $('#cap-tag').textContent = `${SCENES[i].tag} / ${SCENES.length}`;
-    $('#cap-text').innerHTML = SCENES[i].text;
-    if (i === 1) {
-      sparks.visible = true;
-      sparks.children.forEach((s) => { s.position.set(0, 0, 0); s.material.opacity = 1; });
-    }
-    for (const b of BUBBLES) b.el.classList.toggle('show', b.scenes.includes(i));
-  }
-
-  /* The diorama plays itself.
-   *
-   * It was scroll-driven first, which was wrong: the canvas leaves the
-   * viewport long before the later scenes would have been reached, so nobody
-   * ever saw acts three to five. An autoplaying loop with controls shows the
-   * whole argument to a reader who never scrolls at all. */
-  const dots = $('#dots');
-  SCENES.forEach((sc, i) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.setAttribute('role', 'tab');
-    b.setAttribute('aria-label', `Scene ${i + 1}: ${sc.tag}`);
-    b.addEventListener('click', () => { hold = true; setScene(i); markDots(); });
-    dots.appendChild(b);
+  LANES.forEach((name, i) => {
+    svg.appendChild(el('line', { class: 'laneline', x1: L, x2: W - R, y1: y(i), y2: y(i) }));
+    svg.appendChild(el('text', { class: 'lane-name', x: 0, y: y(i) + 4 }, name));
   });
-  const playing = document.createElement('span');
-  playing.className = 'playing';
-  dots.appendChild(playing);
 
-  let hold = false;                     // a click stops the carousel for good
-  function markDots() {
-    [...dots.querySelectorAll('button')].forEach((b, i) =>
-      b.setAttribute('aria-selected', String(i === scene_i)));
-    playing.textContent = hold ? 'paused' : 'playing';
-  }
-
-  // Pause while the pointer is over the stage: reading a caption should not be
-  // interrupted by the thing it describes moving on.
-  let hover = false;
-  stage.addEventListener('pointerenter', () => { hover = true; });
-  stage.addEventListener('pointerleave', () => { hover = false; });
-
-  const DWELL = 4600;
-  let lastAdvance = performance.now();
-  function tick(now) {
-    if (!hold && !hover && running && now - lastAdvance > DWELL) {
-      lastAdvance = now;
-      setScene((scene_i + 1) % SCENES.length);
-      markDots();
+  // Dynamic: one group per event with visuals.
+  const groups = [];
+  for (const ev of TRACE) {
+    if (ev.lane == null) continue;
+    const g = el('g', { class: 'ev' });
+    if (ev.bar) {
+      const w = x(ev.bar.to) - x(ev.bar.from);
+      const rect = el('rect', { class: 'bar held', x: x(ev.bar.from), y: y(ev.lane) - 11, width: 0, height: 22 });
+      g.appendChild(rect);
+      const cid = `clip${ev.seq}`;
+      const clip = el('clipPath', { id: cid });
+      const crect = el('rect', { x: x(ev.bar.from), y: y(ev.lane) - 11, width: 0, height: 22 });
+      clip.appendChild(crect); g.appendChild(clip);
+      const label = el('text', { class: 'bar-label', x: x(ev.bar.from) + 8, y: y(ev.lane) + 4, 'clip-path': `url(#${cid})` }, ev.bar.label);
+      g.appendChild(label);
+      ev._grow = (now) => {
+        const cur = Math.max(0, Math.min(w, x(Math.min(now, ev.bar.to)) - x(ev.bar.from)));
+        rect.setAttribute('width', cur); crect.setAttribute('width', cur);
+        label.style.opacity = cur > ev.bar.label.length * 7.2 + 16 ? 1 : 0;
+      };
     }
+    if (ev.deny) {
+      const cx = x(ev.deny), cy = y(ev.lane);
+      g.appendChild(el('path', { class: 'deny', d: `M${cx} ${cy - 12} l12 12 l-12 12 l-12 -12 z` }));
+      g.appendChild(el('text', { x: cx + 18, y: cy + 4, fill: '#ff4a1f' }, 'denied src/auth.js'));
+    }
+    if (ev.freed) {
+      g.appendChild(el('circle', { class: 'freed', cx: x(ev.freed), cy: y(ev.lane), r: 4 }));
+    }
+    svg.appendChild(g);
+    ev._g = g; groups.push(ev);
+  }
+  for (const ev of TRACE) {
+    if (!ev.msg) continue;
+    const g = el('g', { class: 'ev' });
+    const x0 = x(ev.msg.t), y0 = y(ev.msg.from), y1 = y(ev.msg.to);
+    const dir = y1 > y0 ? 1 : -1;
+    g.appendChild(el('path', { class: 'msg', d: `M${x0} ${y0 + dir * 14} L${x0} ${y1 - dir * 14}` }));
+    g.appendChild(el('circle', { class: 'msg-dot', cx: x0, cy: y1 - dir * 14, r: 3.5 }));
+    svg.appendChild(g);
+    ev._g = g;
+  }
+  const playhead = el('line', { class: 'playhead', x1: x(0), x2: x(0), y1: TOP - 8, y2: TOP + LANE_H * LANES.length });
+  svg.appendChild(playhead);
+
+  const KLASS = { held: 'held', blocked: 'blocked', wire: 'wire', plain: 'plain' };
+  const WORD = { claim_acquired: 'claim', claim_denied: 'denied', claim_released: 'release', path_freed: 'freed',
+    session_started: 'session', intent_declared: 'intent', file_written: 'write', message: 'message' };
+  const stamp = (t) => { const base = 14 * 3600 + 2 * 60 + 11; const s = base + t; return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`; };
+
+  function showBrief(ev) {
+    if (!ev.title) return;
+    brief.innerHTML = `
+      <div class="tag"><span>seq ${ev.seq}</span><span>t + ${ev.t.toFixed(0)}s</span><b class="${KLASS[ev.k]}">${esc(WORD[ev.type] || ev.type)}</b></div>
+      <h4>${esc(ev.title)}</h4>
+      <p>${esc(ev.body)}</p>
+      ${ev.pre ? `<pre>${ev.pre}</pre>` : ''}`;
+  }
+  function addRow(ev) {
+    const r = document.createElement('div');
+    r.className = 'row' + (reduced ? '' : ' enter');
+    r.innerHTML = `<span class="seq">${ev.seq}</span><span>${stamp(ev.t)}</span><span class="u">${esc(ev.user)}</span>` +
+      `<span class="k ${KLASS[ev.k]}">${esc(ev.type)}</span><span class="p">${esc(ev.detail)}</span>`;
+    rowsEl.appendChild(r);
+    while (rowsEl.children.length > 7) rowsEl.removeChild(rowsEl.firstChild);
   }
 
-  function resize() {
-    const w = canvas.clientWidth, h = canvas.clientHeight;
-    if (!w || !h) return;
-    renderer.setSize(w, h, false);
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
+  let now = 0, idx = 0, playing = true, last = null, endAt = null;
+  function reset() {
+    now = 0; idx = 0; endAt = null;
+    rowsEl.innerHTML = '';
+    for (const ev of TRACE) { if (ev._g) ev._g.classList.remove('on'); if (ev._grow) ev._grow(0); }
+    brief.innerHTML = `<div class="tag"><span>waiting</span></div><h4>Nothing has happened yet</h4><p>Two sessions are about to start work in the same repository. Watch the second one hit a file the first already holds.</p>`;
   }
-  addEventListener('resize', resize);
-
-  const lerp = (a, b, t) => a + (b - a) * t;
-  const v = new THREE.Vector3();
-
-  function project(obj3, yOffset) {
-    v.set(0, 0, 0);
-    obj3.localToWorld(v);
-    v.y += yOffset;
-    v.project(camera);
-    return {
-      x: (v.x * 0.5 + 0.5) * canvas.clientWidth,
-      y: (-v.y * 0.5 + 0.5) * canvas.clientHeight,
-    };
+  function advanceTo(t) {
+    now = t;
+    while (idx < TRACE.length && TRACE[idx].t <= now) {
+      const ev = TRACE[idx++];
+      if (ev._g) ev._g.classList.add('on');
+      addRow(ev); showBrief(ev);
+    }
+    for (const ev of groups) if (ev._grow) ev._grow(now);
+    playhead.setAttribute('x1', x(Math.min(now, SPAN))); playhead.setAttribute('x2', x(Math.min(now, SPAN)));
+    clock.textContent = Math.min(now, SPAN).toFixed(1).padStart(4, '0');
   }
+  let visible = true;
+  new IntersectionObserver((es) => { visible = es[0].isIntersecting; }, { threshold: 0.05 }).observe($('#instrument'));
 
-  let running = true, t0 = performance.now();
-  new IntersectionObserver((es) => { running = es[0].isIntersecting; }, { threshold: 0.02 })
-    .observe(canvas);
-
-  function frame(now) {
+  function frame(ts) {
     requestAnimationFrame(frame);
-    if (!running) return;
-    tick(now);
-    const t = (now - t0) / 1000;
-    const k = reduced ? 1 : 0.055;      // reduced motion: snap, don't glide
-    const tgt = targetsFor(scene_i);
-    for (const key2 of Object.keys(tgt)) T[key2] = lerp(T[key2], tgt[key2], k);
-
-    const bob = reduced ? 0 : Math.sin(t * 1.7) * 0.12;
-    const bob2 = reduced ? 0 : Math.sin(t * 1.7 + 1.1) * 0.12;
-
-    ash.position.x = T.ashX;
-    ash.position.y = -1.15 + bob;
-    priya.position.x = T.priyaX;
-    priya.position.y = -1.15 + bob2;
-
-    // Reaching = arm swings toward the file and the robot leans in.
-    ash.userData.arm.rotation.x = -T.ashReach * 0.9;
-    priya.userData.arm.rotation.x = -T.priyaReach * 0.9;
-    ash.rotation.z = T.ashReach * 0.12;
-    priya.rotation.z = -T.priyaReach * 0.12;
-    priya.userData.arm.position.x = -0.85;
-
-    // Status bulbs: green working, red blocked.
-    ash.userData.bulb.material.color.setHex(scene_i === 4 ? 0xffc44d : 0xc6ff4a);
-    priya.userData.bulb.material.color.setHex(scene_i === 2 ? 0xff5c6f : 0xc6ff4a);
-    // Being blocked turns the smile upside down. Nothing explains a state
-    // faster than a face.
-    const glum = scene_i === 1 || scene_i === 2 ? 1 : 0;
-    priya.userData.mouth.rotation.z = lerp(priya.userData.mouth.rotation.z, Math.PI - glum * Math.PI, 0.08);
-    ash.userData.mouth.rotation.z = lerp(ash.userData.mouth.rotation.z, Math.PI - (scene_i === 1 ? Math.PI : 0), 0.08);
-
-    padA.position.x = T.ashX;
-    padB.position.x = T.priyaX;
-
-    backdrop.rotation.y = Math.sin(t * 0.12) * 0.08;
-
-    // Face the reader, wobbling; `spin` becomes agitation, not rotation, so
-    // the label stays readable in every scene.
-    const agitate = Math.max(0, T.spin - 1);
-    file.rotation.y = (reduced ? 0 : Math.sin(t * 0.9) * 0.22) + (reduced ? 0 : Math.sin(t * 14) * 0.05 * agitate);
-    file.rotation.z = reduced ? 0 : Math.sin(t * 17) * 0.04 * agitate;
-    file.position.x = reduced ? 0 : Math.sin(t * 19) * 0.05 * agitate;
-    file.position.y = 0.1 + (reduced ? 0 : Math.sin(t * 1.2) * 0.08);
-    sheetMat.color.lerp(new THREE.Color(scene_i === 1 ? 0xff5c6f : 0xffffff), 0.09);
-
-    lease.material.opacity = T.lease * 0.95;
-    lease.rotation.z = t * 0.8;
-    lease.scale.setScalar(lerp(1.35, 1, T.lease));
-    lease.position.y = file.position.y;
-
-    relay.position.y = T.relayY;
-    relay.rotation.y = t * 0.6;
-    relay.rotation.x = Math.sin(t * 0.5) * 0.25;
-    relay.scale.setScalar(Math.max(0.001, lerp(-0.15, 1, T.relayOn)));
-    halo.position.y = T.relayY;
-    halo.material.opacity = T.relayOn * 0.65;
-    halo.rotation.z = t * 0.35;
-
-    // The message arcs from priya to ash and back.
-    msg.material.opacity = T.msg;
-    if (T.msg > 0.02) {
-      const s = (Math.sin(t * 1.3) + 1) / 2;
-      msg.position.set(lerp(T.priyaX, T.ashX, s), 0.8 + Math.sin(s * Math.PI) * 1.1, 0.8);
+    if (last == null) last = ts;
+    const dt = (ts - last) / 1000; last = ts;
+    if (!playing || !visible) return;
+    if (now >= SPAN) {
+      if (endAt == null) endAt = ts;
+      if (ts - endAt > HOLD * 1000) { reset(); }
+      return;
     }
-
-    if (sparks.visible) {
-      let alive = false;
-      for (const s of sparks.children) {
-        s.position.addScaledVector(s.userData.dir, 0.055);
-        s.rotation.x += 0.15; s.rotation.y += 0.1;
-        s.material.opacity = Math.max(0, s.material.opacity - 0.014);
-        if (s.material.opacity > 0) alive = true;
-      }
-      if (!alive) sparks.visible = false;
-    }
-
-    // Bubbles follow their anchors.
-    for (const b of BUBBLES) {
-      if (!b.el.classList.contains('show')) continue;
-      const p = project(b.anchor, b.anchor === file ? 1.4 : 3.1);
-      b.el.style.left = `${p.x}px`;
-      b.el.style.top = `${p.y}px`;
-    }
-
-    camera.position.x = Math.sin(t * 0.16) * 0.22;
-    camera.lookAt(0, 0.55, 0);
-    renderer.render(scene, camera);
+    advanceTo(now + dt * RATE);
   }
+  $('#inst-toggle').addEventListener('click', (e) => {
+    playing = !playing;
+    e.target.textContent = playing ? 'Pause' : 'Play';
+    $('#inst-state').textContent = playing ? 'playing' : 'paused';
+  });
+  $('#inst-restart').addEventListener('click', () => { reset(); if (!playing) { playing = true; $('#inst-toggle').textContent = 'Pause'; $('#inst-state').textContent = 'playing'; } });
 
-  resize();
-  markDots();
+  reset();
+  if (reduced) { advanceTo(SPAN); $('#inst-state').textContent = 'complete'; return; }
   requestAnimationFrame(frame);
 })();
 </script>

@@ -1,558 +1,459 @@
 <!--
   knoot console — the team's own view.
 
-  Three jobs: hand over the enrolment commands already filled in, manage the
-  team's tokens, and show the live event log so a human can tell coordination
-  is actually on. That last one matters more than it looks: knoot fails open,
-  so a broken install is indistinguishable from a quiet one from inside an
-  agent. This page is where you look instead.
+  Three jobs: show the live log so a human can tell coordination is actually
+  on (knoot fails open, so from inside an agent a broken install looks like a
+  quiet one), manage the team's tokens, and hand over the enrolment commands
+  already filled in. The log is the product, so it gets the room.
 -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>knoot console</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@700;800&family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wdth,wght@0,75..100,400..700;1,75..100,400..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 
 <style>
 :root {
-  --ink: #07060f;
-  --panel: rgba(255,255,255,.045);
-  --panel-2: rgba(255,255,255,.025);
-  --edge: rgba(255,255,255,.13);
-  --text: #f2effa;
-  --dim: #a49dc4;
-  --dimmer: #6f6890;
-  --cyan: #35e8ff;
-  --mag: #ff5cd6;
-  --lime: #c6ff4a;
-  --amber: #ffc44d;
-  --red: #ff5c6f;
-  --display: 'Baloo 2', system-ui, sans-serif;
-  --body: 'Space Grotesk', system-ui, sans-serif;
-  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  --bg: #12161a;
+  --panel: #171c21;
+  --panel-2: #1d232a;
+  --rule: #2b3238;
+  --rule-2: #222830;
+  --text: #e8ecef;
+  --text-2: #aab2ba;
+  --dim: #7d868f;
+  --held: #19a974;
+  --blocked: #ff4a1f;
+  --wire: #3b7bff;
+  --sans: 'Instrument Sans', system-ui, sans-serif;
+  --mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 }
 * { box-sizing: border-box; }
+html, body { height: 100%; }
 body {
-  margin: 0; background: var(--ink); color: var(--text);
-  font-family: var(--body); -webkit-font-smoothing: antialiased;
+  margin: 0; background: var(--bg); color: var(--text);
+  font-family: var(--sans); font-size: 15px; line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
-body::before {
-  content: ''; position: fixed; inset: 0; z-index: 0; pointer-events: none;
-  background:
-    radial-gradient(800px 500px at 8% -8%, rgba(53,232,255,.13), transparent 70%),
-    radial-gradient(700px 600px at 96% 4%, rgba(255,92,214,.11), transparent 70%);
-}
-.wrap { width: min(1240px, 94vw); margin: 0 auto; position: relative; z-index: 2; }
-a { color: var(--cyan); }
-
-header.nav {
-  border-bottom: 1px solid var(--edge); backdrop-filter: blur(14px);
-  background: rgba(7,6,15,.75); position: sticky; top: 0; z-index: 40;
-}
-.nav .wrap { display: flex; align-items: center; gap: 16px; padding: 13px 0; }
-.logo {
-  font-family: var(--display); font-weight: 800; font-size: 23px;
-  display: flex; align-items: center; gap: 9px; text-decoration: none; color: var(--text);
-}
-.logo .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--dimmer); }
-.logo .dot.live { background: var(--lime); box-shadow: 0 0 14px var(--lime); }
-.logo .dot.off { background: var(--red); box-shadow: 0 0 14px var(--red); }
-.nav .team {
-  font-family: var(--mono); font-size: 12.5px; color: var(--dim);
-  border: 1px solid var(--edge); border-radius: 999px; padding: 5px 12px;
-}
-.nav .right { margin-left: auto; display: flex; gap: 14px; align-items: center; }
-.nav .right a { color: var(--dim); text-decoration: none; font-size: 14.5px; }
-.nav .right a:hover { color: var(--text); }
+a { color: inherit; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+code, pre { font-family: var(--mono); font-size: .93em; }
+:focus-visible { outline: 2px solid var(--wire); outline-offset: 2px; }
+.hidden { display: none !important; }
+h1, h2, h3 { margin: 0; font-weight: 500; letter-spacing: -.015em; }
+p { margin: 0; }
 
 .btn {
-  font-family: var(--body); font-weight: 700; font-size: 14.5px;
-  border: 0; border-radius: 999px; padding: 10px 19px; cursor: pointer;
-  color: #07060f; background: linear-gradient(100deg, var(--cyan), var(--lime));
-  box-shadow: 0 4px 0 rgba(0,0,0,.45); text-decoration: none; display: inline-block;
+  font: 500 14px/1 var(--sans); color: var(--bg); background: var(--text); border: 1px solid var(--text);
+  padding: 10px 14px; border-radius: 3px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 8px;
 }
-.btn:hover { transform: translateY(-1px); }
-.btn:active { transform: translateY(2px); box-shadow: 0 1px 0 rgba(0,0,0,.45); }
-.btn:disabled { opacity: .5; cursor: not-allowed; transform: none; }
-.btn.sm { font-size: 12.5px; padding: 7px 14px; }
-.btn.ghost { background: transparent; color: var(--text); border: 2px solid var(--edge); box-shadow: none; }
-.btn.ghost:hover { border-color: var(--cyan); }
-.btn.danger { background: transparent; color: var(--red); border: 2px solid rgba(255,92,111,.45); box-shadow: none; }
-.btn.danger:hover { border-color: var(--red); }
+.btn:hover { background: #fff; }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.quiet { background: transparent; color: var(--text); border-color: var(--rule); }
+.btn.quiet:hover { border-color: var(--dim); background: transparent; }
+.btn.danger { background: transparent; color: var(--blocked); border-color: rgba(255,74,31,.4); }
+.btn.danger:hover { border-color: var(--blocked); background: transparent; }
+.btn.sm { padding: 6px 10px; font-size: 13px; }
+input, select {
+  font: 15px var(--sans); color: var(--text); background: var(--bg); border: 1px solid var(--rule); border-radius: 3px; padding: 9px 12px;
+}
+input:focus, select:focus { outline: none; border-color: var(--wire); }
+input.mono { font-family: var(--mono); font-size: 14px; }
+
+/* ---------- top bar ---------- */
+.top { display: flex; align-items: center; gap: 20px; height: 52px; padding: 0 20px; border-bottom: 1px solid var(--rule); background: var(--panel); }
+.brand { font-weight: 600; font-size: 17px; text-decoration: none; display: flex; align-items: center; gap: 9px; }
+.brand i { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); display: inline-block; }
+.brand i.live { background: var(--held); } .brand i.off { background: var(--blocked); }
+.top .team { font-size: 14px; color: var(--text-2); }
+.top .team b { font-weight: 500; color: var(--text); }
+.top .team code { color: var(--dim); font-size: 12.5px; margin-left: 8px; }
+.top .right { margin-left: auto; display: flex; gap: 18px; align-items: center; font-size: 14px; }
+.top .right a { color: var(--text-2); text-decoration: none; }
+.top .right a:hover { color: var(--text); }
 
 /* ---------- gate ---------- */
-.gate { max-width: 520px; margin: 12vh auto; text-align: center; }
-.gate h1 { font-family: var(--display); font-weight: 800; font-size: 38px; margin: 0 0 10px; }
-.gate p { color: var(--dim); line-height: 1.6; margin: 0 0 22px; }
-.gate input {
-  width: 100%; padding: 14px 16px; border-radius: 13px; border: 2px solid var(--edge);
-  background: rgba(0,0,0,.45); color: var(--text); font-family: var(--mono); font-size: 14px;
-  margin-bottom: 14px;
+.gate { max-width: 440px; margin: 14vh auto 0; padding: 0 20px; }
+.gate h1 { font-size: 34px; font-variation-settings: 'wdth' 86; line-height: 1.1; }
+.gate p { color: var(--text-2); margin-top: 14px; }
+.gate label { display: block; margin-top: 28px; font-size: 14px; color: var(--text-2); }
+.gate input { width: 100%; margin-top: 8px; }
+.gate .row { display: flex; gap: 10px; margin-top: 14px; align-items: center; }
+.err { color: var(--blocked); font-size: 14px; margin-top: 12px; }
+.gate .alt { margin-top: 36px; padding-top: 20px; border-top: 1px solid var(--rule); color: var(--text-2); font-size: 14px; }
+
+/* ---------- console ---------- */
+.console { display: grid; grid-template-columns: 1fr 380px; gap: 0; min-height: calc(100% - 52px); }
+.live { border-right: 1px solid var(--rule); display: flex; flex-direction: column; min-width: 0; }
+.rail { display: flex; flex-direction: column; min-width: 0; background: var(--panel); }
+
+.bar { display: flex; align-items: center; gap: 14px; padding: 12px 20px; border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
+.bar h2 { font-size: 15px; }
+.bar select { padding: 6px 10px; font-family: var(--mono); font-size: 13px; }
+.bar .state { font-size: 13.5px; color: var(--dim); }
+.bar .state.live { color: var(--held); } .bar .state.off { color: var(--blocked); }
+.counts { margin-left: auto; display: flex; gap: 22px; font-size: 13.5px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.counts b { font-weight: 500; color: var(--text); font-family: var(--mono); margin-right: 5px; }
+.counts .blocked b { color: var(--blocked); }
+
+.presence { border-bottom: 1px solid var(--rule); }
+.presence table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.presence th { text-align: left; font-weight: 400; color: var(--dim); font-size: 13px; padding: 10px 20px 8px; border-bottom: 1px solid var(--rule-2); }
+.presence td { padding: 9px 20px; border-bottom: 1px solid var(--rule-2); vertical-align: top; }
+.presence tr:last-child td { border-bottom: 0; }
+.presence td.who { font-family: var(--mono); font-size: 13px; white-space: nowrap; }
+.presence td.intent { color: var(--text-2); }
+.presence td.holds { font-family: var(--mono); font-size: 12.5px; color: var(--held); }
+.presence td.holds.blocked { color: var(--blocked); font-family: var(--sans); font-size: 14px; }
+.presence td.holds .none { color: var(--dim); font-family: var(--sans); font-size: 14px; }
+.presence td.holds span + span::before { content: ' '; }
+
+.log { flex: 1; overflow-y: auto; font-family: var(--mono); font-size: 12.5px; min-height: 320px; max-height: calc(100vh - 220px); }
+.log .row {
+  display: grid; grid-template-columns: 76px 84px 130px 1fr; gap: 14px; padding: 6px 20px;
+  border-bottom: 1px solid var(--rule-2); font-variant-numeric: tabular-nums; color: var(--text-2); align-items: baseline;
 }
-.gate input:focus { outline: none; border-color: var(--cyan); }
-.hidden { display: none !important; }
+.log .row.h { position: sticky; top: 0; background: var(--bg); color: var(--dim); font-family: var(--sans); font-size: 12.5px; border-bottom: 1px solid var(--rule); }
+.log .row:hover { background: var(--panel); }
+.log .t { color: var(--dim); }
+.log .u { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log .k { font-weight: 500; }
+.log .k.held { color: var(--held); } .log .k.blocked { color: var(--blocked); } .log .k.wire { color: var(--wire); }
+.log .k.warn { color: #f0b429; } .log .k.plain { color: var(--text-2); }
+.log .d { overflow-wrap: anywhere; }
+.log .row.blocked { background: rgba(255,74,31,.06); }
+.log .row.enter { animation: rowin .5s ease-out; }
+@keyframes rowin { from { background: var(--panel-2); } to { background: transparent; } }
+.empty { padding: 34px 20px; color: var(--text-2); font-size: 14.5px; line-height: 1.6; max-width: 52ch; }
+.empty code { color: var(--text); }
 
-/* ---------- layout ---------- */
-.cols { display: grid; grid-template-columns: 1fr 1.25fr; gap: 20px; padding: 24px 0 60px; }
-.stack { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
-.card {
-  border: 1px solid var(--edge); border-radius: 20px; background: var(--panel);
-  overflow: hidden; min-width: 0;
-}
-.card > h2 {
-  font-family: var(--display); font-weight: 700; font-size: 17px; margin: 0;
-  padding: 15px 18px; border-bottom: 1px solid var(--edge);
-  display: flex; align-items: center; gap: 10px;
-}
-.card > h2 .hint { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--dimmer); font-weight: 400; }
-.card .body { padding: 18px; }
-.card .body > p:first-child { margin-top: 0; }
-.card p { color: var(--dim); font-size: 14.5px; line-height: 1.6; }
+/* ---------- rail ---------- */
+.block { padding: 20px; border-bottom: 1px solid var(--rule); }
+.block:last-child { border-bottom: 0; }
+.block h2 { font-size: 15px; display: flex; align-items: baseline; gap: 10px; }
+.block h2 .n { color: var(--dim); font-weight: 400; font-size: 13.5px; }
+.block > p { color: var(--text-2); font-size: 14px; margin-top: 8px; }
+.block .note { font-size: 13.5px; color: var(--dim); margin-top: 14px; }
 
-.cmd { display: flex; gap: 8px; align-items: center; background: #06050d;
-  border: 1px solid var(--edge); border-radius: 11px; padding: 10px 12px; margin: 9px 0; }
-.cmd code { font-family: var(--mono); font-size: 12.4px; color: var(--cyan); flex: 1; white-space: pre-wrap; word-break: break-all; line-height: 1.5; }
-.copy { border: 1px solid var(--edge); background: rgba(255,255,255,.06); color: var(--dim);
-  font-family: var(--mono); font-size: 10.5px; padding: 4px 8px; border-radius: 6px; cursor: pointer; flex-shrink: 0; }
-.copy:hover { color: var(--text); border-color: var(--cyan); }
-.step-label { font-family: var(--mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
-  color: var(--dimmer); margin: 16px 0 0; }
-.step-label:first-of-type { margin-top: 0; }
+.tokens { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 14px; }
+.tokens td { padding: 9px 0; border-top: 1px solid var(--rule-2); vertical-align: middle; }
+.tokens td.meta { color: var(--dim); font-size: 13px; white-space: nowrap; }
+.tokens td.act { text-align: right; }
+.tokens .this { font-size: 12px; color: var(--held); margin-left: 8px; }
+.tokens .dead { color: var(--dim); text-decoration: line-through; }
+.tokens .dead-tag { font-size: 12px; color: var(--dim); margin-left: 8px; }
+.mint { display: flex; gap: 8px; margin-top: 14px; }
+.mint input { flex: 1; min-width: 0; }
+.tok-new { margin-top: 14px; padding: 12px 14px; background: var(--bg); border-radius: 4px; border-left: 3px solid var(--blocked); }
+.tok-new .lbl { font-size: 13px; color: var(--text-2); margin-bottom: 6px; }
+.tok-new .val { font-family: var(--mono); font-size: 13px; word-break: break-all; }
 
-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th { text-align: left; font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
-  text-transform: uppercase; color: var(--dimmer); font-weight: 400;
-  padding: 0 12px 9px; border-bottom: 1px solid var(--edge); }
-td { padding: 11px 12px; border-bottom: 1px solid rgba(255,255,255,.06); vertical-align: middle; }
-tr:last-child td { border-bottom: 0; }
-td.mono, .mono { font-family: var(--mono); font-size: 12.5px; }
-.pill { font-family: var(--mono); font-size: 10.5px; padding: 3px 8px; border-radius: 999px;
-  border: 1px solid var(--edge); color: var(--dim); }
-.pill.live { color: var(--lime); border-color: rgba(198,255,74,.4); }
-.pill.dead { color: var(--red); border-color: rgba(255,92,111,.4); }
-.pill.idle { color: var(--dimmer); }
-
-.tok-new { border: 2px dashed var(--lime); border-radius: 13px; padding: 12px;
-  background: #06050d; margin-bottom: 14px; }
-.tok-new .lbl { font-family: var(--mono); font-size: 10.5px; color: var(--amber); letter-spacing: .1em;
-  text-transform: uppercase; margin-bottom: 7px; }
-.tok-new .val { font-family: var(--mono); font-size: 13px; color: var(--lime); word-break: break-all; }
-.mint-row { display: flex; gap: 9px; margin-top: 14px; }
-.mint-row input { flex: 1; padding: 9px 12px; border-radius: 10px; border: 2px solid var(--edge);
-  background: rgba(0,0,0,.4); color: var(--text); font-family: var(--body); font-size: 14px; }
-.mint-row input:focus { outline: none; border-color: var(--cyan); }
-
-/* ---------- live ---------- */
-.repo-bar { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; padding: 13px 18px;
-  border-bottom: 1px solid var(--edge); }
-.repo-bar select { background: rgba(0,0,0,.4); color: var(--text); border: 2px solid var(--edge);
-  border-radius: 10px; padding: 7px 11px; font-family: var(--mono); font-size: 12.5px; }
-.repo-bar select:focus { outline: none; border-color: var(--cyan); }
-.stats { display: flex; gap: 7px; margin-left: auto; flex-wrap: wrap; }
-
-.log { font-family: var(--mono); font-size: 12.3px; max-height: 420px; overflow-y: auto; padding: 4px 0; }
-.log .row { display: grid; grid-template-columns: 62px 88px 82px 1fr; gap: 10px;
-  padding: 5px 18px; align-items: baseline; }
-.log .row:hover { background: rgba(255,255,255,.035); }
-.log .t { color: var(--dimmer); }
-.log .u { color: var(--cyan); overflow: hidden; text-overflow: ellipsis; }
-.log .k { font-weight: 700; }
-.log .k.claim { color: var(--lime); }
-.log .k.denied { color: var(--red); }
-.log .k.freed { color: var(--amber); }
-.log .k.msg { color: var(--mag); }
-.log .k.other { color: var(--dimmer); }
-.log .d { color: var(--dim); overflow-wrap: anywhere; }
-.empty { padding: 30px 18px; color: var(--dimmer); font-family: var(--mono); font-size: 12.5px; line-height: 1.7; }
-
-.who td.holds { font-family: var(--mono); font-size: 12px; color: var(--lime); }
-.who td.blocked { color: var(--red); }
-
-.err { color: var(--red); font-family: var(--mono); font-size: 13px; margin-top: 10px; }
-.foot { color: var(--dimmer); font-size: 13px; padding: 0 0 40px; }
+.step { margin-top: 16px; }
+.step:first-of-type { margin-top: 14px; }
+.step p { font-size: 13.5px; color: var(--text-2); }
+.cmd { display: flex; align-items: center; gap: 10px; margin-top: 6px; background: var(--bg); border: 1px solid var(--rule-2); border-radius: 4px; padding: 8px 10px; }
+.cmd code { flex: 1; font-size: 12.5px; white-space: pre; overflow-x: auto; }
+.cmd code::-webkit-scrollbar { height: 0; }
+.copy { flex-shrink: 0; background: transparent; border: 1px solid var(--rule); color: var(--dim); font: 12px var(--sans); padding: 3px 8px; border-radius: 3px; cursor: pointer; }
+.copy:hover { color: var(--text); border-color: var(--dim); }
 
 @media (max-width: 980px) {
-  .cols { grid-template-columns: 1fr; }
-  .log .row { grid-template-columns: 54px 72px 74px 1fr; font-size: 11.6px; }
+  .console { grid-template-columns: 1fr; }
+  .live { border-right: 0; border-bottom: 1px solid var(--rule); }
+  .log { max-height: 60vh; }
+  .log .row { grid-template-columns: 64px 70px 100px 1fr; gap: 10px; font-size: 11.8px; }
+  .presence td.intent { display: none; } .presence th:nth-child(2) { display: none; }
 }
+@media (prefers-reduced-motion: reduce) { .log .row.enter { animation: none; } }
 </style>
 
-<header class="nav">
-  <div class="wrap">
-    <a class="logo" href="/"><span class="dot" id="live-dot"></span>knoot</a>
-    <span class="team hidden" id="team-pill">—</span>
-    <div class="right">
-      <a href="/">Home</a>
-      <a href="https://github.com/Ash20pk/knoot">Docs</a>
-      <a href="#" id="signout" class="hidden">Sign out</a>
-    </div>
+<header class="top">
+  <a class="brand" href="/"><i id="live-dot"></i>knoot</a>
+  <span class="team hidden" id="team-pill"></span>
+  <div class="right">
+    <a href="/">Site</a>
+    <a href="https://github.com/Ash20pk/knoot">Docs</a>
+    <a href="#" id="signout" class="hidden">Sign out</a>
   </div>
 </header>
 
-<!-- Gate: no token, nothing to show. -->
-<section class="wrap gate" id="gate">
-  <h1>Console</h1>
-  <p>
-    Paste your team token. It is kept in this browser only — the console talks
-    to the relay directly and there is no session to steal.
-  </p>
-  <input id="gate-token" type="password" placeholder="knt_…" autocomplete="off" spellcheck="false">
-  <button class="btn" id="gate-go">Open console →</button>
+<section class="gate" id="gate">
+  <h1>Open your team’s console</h1>
+  <p>Paste a team token. It stays in this browser and is sent only to this relay. There is no session to steal.</p>
+  <label>Team token
+    <input id="gate-token" class="mono" type="password" placeholder="knt_" autocomplete="off" spellcheck="false">
+  </label>
+  <div class="row"><button class="btn" id="gate-go">Open console</button></div>
   <div class="err hidden" id="gate-err"></div>
-  <p style="margin-top:26px;font-size:14px">
-    No team yet? <a href="/#start">Register one</a> — it takes a name and nothing else.
-  </p>
+  <p class="alt">No team yet? <a href="/#start">Register one</a>. It takes a name and nothing else.</p>
 </section>
 
-<!-- Console -->
-<main class="wrap cols hidden" id="console">
-  <div class="stack">
+<main class="console hidden" id="console">
+  <section class="live">
+    <div class="bar">
+      <h2>Live</h2>
+      <select id="repo-pick" aria-label="Repository"><option value="">no repositories yet</option></select>
+      <span class="state" id="conn-hint">connecting</span>
+      <div class="counts" id="counts"></div>
+    </div>
+    <div class="presence hidden" id="who-wrap">
+      <table>
+        <thead><tr><th>Session</th><th>Working on</th><th>Holds</th></tr></thead>
+        <tbody id="who-rows"></tbody>
+      </table>
+    </div>
+    <div class="log" id="log">
+      <div class="row h"><span>time</span><span>user</span><span>event</span><span>detail</span></div>
+      <div id="log-rows"></div>
+    </div>
+  </section>
 
-    <section class="card">
-      <h2>⚡ Enrol a repo <span class="hint">already filled in</span></h2>
-      <div class="body">
-        <p>Run these where your agents run. The first is once per repo; the rest are once per machine.</p>
-        <div class="step-label">1 · install</div>
-        <div class="cmd"><code>cargo install --git https://github.com/Ash20pk/knoot</code><button class="copy">copy</button></div>
-        <div class="step-label">2 · enrol the repo, then commit what it writes</div>
-        <div class="cmd"><code id="c-init"></code><button class="copy">copy</button></div>
-        <div class="step-label">3 · store the token, once per machine</div>
-        <div class="cmd"><code id="c-login"></code><button class="copy">copy</button></div>
-        <div class="step-label">4 · run the daemon, then check it is really on</div>
-        <div class="cmd"><code>knoot daemon</code><button class="copy">copy</button></div>
-        <div class="cmd"><code>knoot status</code><button class="copy">copy</button></div>
+  <aside class="rail">
+    <div class="block">
+      <h2>Tokens <span class="n" id="tok-count"></span></h2>
+      <p>Each machine should have its own token, so revoking one costs nothing else. Existing tokens are stored hashed and cannot be shown again.</p>
+      <div class="tok-new hidden" id="tok-new">
+        <div class="lbl">New token. This is the only time it is readable.</div>
+        <div class="val" id="tok-new-val"></div>
       </div>
-    </section>
+      <table class="tokens"><tbody id="tok-rows"></tbody></table>
+      <div class="mint">
+        <input id="mint-label" maxlength="40" placeholder="Label, like laptop or ci">
+        <button class="btn quiet" id="mint-go">Mint token</button>
+      </div>
+      <div class="err hidden" id="tok-err"></div>
+    </div>
 
-    <section class="card">
-      <h2>🔑 Tokens <span class="hint" id="tok-count"></span></h2>
-      <div class="body">
-        <div class="tok-new hidden" id="tok-new">
-          <div class="lbl">▲ shown once — copy it now</div>
-          <div class="val" id="tok-new-val"></div>
-        </div>
-        <table>
-          <thead><tr><th>Label</th><th>Created</th><th>Last used</th><th></th></tr></thead>
-          <tbody id="tok-rows"></tbody>
-        </table>
-        <div class="mint-row">
-          <input id="mint-label" maxlength="40" placeholder="label, e.g. ci or laptop">
-          <button class="btn sm" id="mint-go">Mint token</button>
-        </div>
-        <div class="err hidden" id="tok-err"></div>
-        <p style="font-size:13px;margin-bottom:0">
-          Tokens are stored hashed — we cannot show you an existing one, only mint a
-          new one. Give each machine its own, so revoking one costs you nothing else.
-        </p>
+    <div class="block">
+      <h2>Enrol a repository</h2>
+      <p>Run these where your agents run. The first two are once per repository, the rest once per machine.</p>
+      <div class="step"><p>Install</p><div class="cmd"><code>cargo install --git https://github.com/Ash20pk/knoot</code><button class="copy" type="button">Copy</button></div></div>
+      <div class="step"><p>Enrol the repository, then commit what it writes</p><div class="cmd"><code id="c-init"></code><button class="copy" type="button">Copy</button></div></div>
+      <div class="step"><p>Store this team’s token on the machine</p><div class="cmd"><code id="c-login"></code><button class="copy" type="button">Copy</button></div></div>
+      <div class="step"><p>Run the daemon and confirm it is on</p>
+        <div class="cmd"><code>knoot daemon</code><button class="copy" type="button">Copy</button></div>
+        <div class="cmd"><code>knoot status</code><button class="copy" type="button">Copy</button></div>
       </div>
-    </section>
-  </div>
+    </div>
 
-  <div class="stack">
-    <section class="card">
-      <h2>📡 Live <span class="hint" id="conn-hint">connecting…</span></h2>
-      <div class="repo-bar">
-        <select id="repo-pick"><option value="">no repos yet</option></select>
-        <div class="stats" id="stats"></div>
-      </div>
-      <div id="who-wrap" class="hidden">
-        <table class="who">
-          <thead><tr><th>Agent</th><th>Intent</th><th>Holds</th></tr></thead>
-          <tbody id="who-rows"></tbody>
-        </table>
-      </div>
-      <div class="log" id="log"></div>
-    </section>
-
-    <section class="card">
-      <h2>🧪 Prove it works</h2>
-      <div class="body">
-        <p style="margin-top:0">
-          knoot fails open, so silence means nothing on its own. To see this page
-          light up, give two sessions the same file in an enrolled repo:
-        </p>
-        <div class="cmd"><code>KNOOT_USER=ash claude</code><button class="copy">copy</button></div>
-        <div class="cmd"><code>KNOOT_USER=priya claude</code><button class="copy">copy</button></div>
-        <p style="margin-bottom:0">
-          Ask both to refactor the same module. The second gets a conflict brief with
-          the first's identity and intent, and the denial appears above as
-          <span class="mono" style="color:var(--red)">claim_denied</span>.
-        </p>
-      </div>
-    </section>
-  </div>
+    <div class="block">
+      <h2>See it work</h2>
+      <p>knoot fails open, so a quiet log proves nothing on its own. Start two sessions in an enrolled repository and give both the same file.</p>
+      <div class="step"><div class="cmd"><code>KNOOT_USER=ash claude</code><button class="copy" type="button">Copy</button></div>
+        <div class="cmd"><code>KNOOT_USER=priya claude</code><button class="copy" type="button">Copy</button></div></div>
+      <p class="note">The second session is handed a conflict brief naming the first, and the refusal appears in the log as <code>claim_denied</code>.</p>
+    </div>
+  </aside>
 </main>
-
-<div class="wrap foot" id="foot"></div>
 
 <script>
 'use strict';
-
 const $ = (s, r = document) => r.querySelector(s);
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 const WS_SCHEME = location.protocol === 'https:' ? 'wss' : 'ws';
 const RELAY_WS = `${WS_SCHEME}://${location.host}/ws`;
-$('#foot').textContent = `relay ${RELAY_WS}`;
-
 const KEY = 'knoot.token';
-let TOKEN = null;
-let TEAM = null;
+let TOKEN = null, TEAM = null;
 let ws = null, wsRepo = null, wsGen = 0;
 
-/* --- token plumbing ------------------------------------------------ */
 function readToken() {
   const q = new URLSearchParams(location.search).get('token');
   if (q) {
     try { localStorage.setItem(KEY, q); } catch (_) {}
-    // Keep it out of the address bar and out of the browser history.
-    history.replaceState(null, '', location.pathname);
+    history.replaceState(null, '', location.pathname);   // keep it out of history
     return q;
   }
   try { return localStorage.getItem(KEY); } catch (_) { return null; }
 }
-
 const auth = (extra = {}) => ({ Authorization: `Bearer ${TOKEN}`, ...extra });
-
 async function api(path, opts = {}) {
-  const r = await fetch(path, {
-    ...opts,
-    headers: auth(opts.body ? { 'Content-Type': 'application/json' } : {}),
-  });
+  const r = await fetch(path, { ...opts, headers: auth(opts.body ? { 'Content-Type': 'application/json' } : {}) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `${r.status} ${r.statusText}`);
   return j;
 }
 
-/* --- boot ---------------------------------------------------------- */
+/* ---- boot ---- */
 async function open_(tok) {
   TOKEN = tok;
-  const t = await api('/api/team');       // throws on a bad token
+  const t = await api('/api/team');
   TEAM = t;
   try { localStorage.setItem(KEY, tok); } catch (_) {}
-
   $('#gate').classList.add('hidden');
   $('#console').classList.remove('hidden');
   $('#signout').classList.remove('hidden');
   const pill = $('#team-pill');
   pill.classList.remove('hidden');
-  pill.textContent = `${t.team} · ${t.team_id}`;
-
+  pill.innerHTML = `<b>${esc(t.team)}</b><code>${esc(t.team_id)}</code>`;
   $('#c-init').textContent = `knoot init --relay ${RELAY_WS}`;
   $('#c-login').textContent = `knoot login --relay ${RELAY_WS} --token ${tok}`;
-
   renderTokens(t.tokens || []);
   renderRepos(t.repos || []);
 }
 
 $('#gate-go').addEventListener('click', async () => {
-  const v = $('#gate-token').value.trim();
-  const err = $('#gate-err');
+  const v = $('#gate-token').value.trim(), err = $('#gate-err');
   if (!v) return;
   err.classList.add('hidden');
-  try {
-    await open_(v);
-  } catch (e) {
-    err.textContent = e.message.includes('401')
-      ? 'that token is not valid on this relay'
-      : e.message;
+  try { await open_(v); }
+  catch (e) {
+    err.textContent = e.message.includes('401') ? 'That token is not valid on this relay.' : e.message;
     err.classList.remove('hidden');
   }
 });
 $('#gate-token').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#gate-go').click(); });
-
 $('#signout').addEventListener('click', (e) => {
   e.preventDefault();
   try { localStorage.removeItem(KEY); } catch (_) {}
   location.href = '/app';
 });
 
-/* --- tokens -------------------------------------------------------- */
+/* ---- tokens ---- */
 const when = (ms) => {
-  if (!ms) return '—';
+  if (!ms) return 'never';
   const d = Date.now() - ms;
   if (d < 60e3) return 'just now';
-  if (d < 3600e3) return `${Math.floor(d / 60e3)}m ago`;
-  if (d < 86400e3) return `${Math.floor(d / 3600e3)}h ago`;
-  return `${Math.floor(d / 86400e3)}d ago`;
+  if (d < 3600e3) return `${Math.floor(d / 60e3)} min ago`;
+  if (d < 86400e3) return `${Math.floor(d / 3600e3)} h ago`;
+  return `${Math.floor(d / 86400e3)} d ago`;
 };
-
 function renderTokens(rows) {
   const live = rows.filter((r) => !r.revoked);
   $('#tok-count').textContent = `${live.length} live`;
   $('#tok-rows').innerHTML = rows.map((r) => `
     <tr>
-      <td>${esc(r.label)}${r.id === TEAM.token_id ? ' <span class="pill live">this one</span>' : ''}
-          ${r.revoked ? ' <span class="pill dead">revoked</span>' : ''}</td>
-      <td class="mono">${when(r.created_ts)}</td>
-      <td class="mono">${r.last_seen_ts ? when(r.last_seen_ts) : '<span class="pill idle">never</span>'}</td>
-      <td style="text-align:right">${r.revoked ? ''
-        : `<button class="btn danger sm" data-revoke="${esc(r.id)}">Revoke</button>`}</td>
+      <td><span class="${r.revoked ? 'dead' : ''}">${esc(r.label || 'unlabelled')}</span>${r.id === TEAM.token_id ? '<span class="this">this console</span>' : ''}${r.revoked ? '<span class="dead-tag">revoked</span>' : ''}</td>
+      <td class="meta">${r.revoked ? '' : `used ${when(r.last_seen_ts)}`}</td>
+      <td class="act">${r.revoked ? '' : `<button class="btn danger sm" data-revoke="${esc(r.id)}">Revoke</button>`}</td>
     </tr>`).join('');
-
   $('#tok-rows').querySelectorAll('[data-revoke]').forEach((b) => {
     b.addEventListener('click', async () => {
-      const id = b.dataset.revoke;
-      const mine = id === TEAM.token_id;
+      const id = b.dataset.revoke, mine = id === TEAM.token_id;
       if (!confirm(mine
-        ? 'This is the token this console is using. Revoking it signs you out and breaks any machine using it. Continue?'
-        : 'Revoke this token? Any machine using it stops coordinating — and fails open, so its agents keep working uncoordinated.')) return;
-      const err = $('#tok-err');
-      err.classList.add('hidden');
-      b.disabled = true;
+        ? 'This is the token this console is using. Revoking it signs you out and stops every machine using it. Continue?'
+        : 'Revoke this token? Machines using it stop coordinating. They fail open, so their agents keep working alone.')) return;
+      const err = $('#tok-err'); err.classList.add('hidden'); b.disabled = true;
       try {
         await api(`/api/tokens/${encodeURIComponent(id)}/revoke`, { method: 'POST' });
         if (mine) { try { localStorage.removeItem(KEY); } catch (_) {} location.href = '/app'; return; }
         renderTokens((await api('/api/team')).tokens || []);
-      } catch (e) {
-        err.textContent = e.message;
-        err.classList.remove('hidden');
-        b.disabled = false;
-      }
+      } catch (e) { err.textContent = e.message; err.classList.remove('hidden'); b.disabled = false; }
     });
   });
 }
-
 $('#mint-go').addEventListener('click', async () => {
   const btn = $('#mint-go'), err = $('#tok-err');
-  err.classList.add('hidden');
-  btn.disabled = true;
+  err.classList.add('hidden'); btn.disabled = true;
   try {
-    const j = await api('/api/tokens', {
-      method: 'POST',
-      body: JSON.stringify({ label: $('#mint-label').value.trim() }),
-    });
+    const j = await api('/api/tokens', { method: 'POST', body: JSON.stringify({ label: $('#mint-label').value.trim() }) });
     $('#tok-new-val').textContent = j.token;
     $('#tok-new').classList.remove('hidden');
     $('#mint-label').value = '';
     renderTokens((await api('/api/team')).tokens || []);
-  } catch (e) {
-    err.textContent = e.message;
-    err.classList.remove('hidden');
-  } finally {
-    btn.disabled = false;
-  }
+  } catch (e) { err.textContent = e.message; err.classList.remove('hidden'); }
+  finally { btn.disabled = false; }
 });
-
 document.addEventListener('click', (e) => {
   const b = e.target.closest('.copy');
   if (!b) return;
-  const code = b.parentElement.querySelector('code').textContent;
-  navigator.clipboard?.writeText(code).then(() => {
-    const was = b.textContent;
-    b.textContent = 'copied';
-    setTimeout(() => { b.textContent = was; }, 1200);
-  }, () => { b.textContent = 'failed'; });
+  navigator.clipboard?.writeText(b.parentElement.querySelector('code').textContent).then(() => {
+    b.textContent = 'Copied'; setTimeout(() => { b.textContent = 'Copy'; }, 1400);
+  }, () => { b.textContent = 'Copy failed'; });
 });
 
-/* --- live log ------------------------------------------------------ */
+/* ---- live ---- */
 function renderRepos(repos) {
   const sel = $('#repo-pick');
   const names = repos.map((r) => r.repo);
   if (!names.length) {
-    sel.innerHTML = '<option value="">no repos yet</option>';
-    $('#log').innerHTML = `<div class="empty">
-      Nothing has connected yet.<br><br>
-      Run <span style="color:var(--cyan)">knoot init</span> in a repo with the commands on
-      the left, start <span style="color:var(--cyan)">knoot daemon</span>, and this fills
-      in as your agents work.</div>`;
+    sel.innerHTML = '<option value="">no repositories yet</option>';
+    $('#log-rows').innerHTML = `<div class="empty">Nothing has connected yet. Run <code>knoot init</code> in a repository with the commands on the right, start <code>knoot daemon</code>, and this fills in as your agents work.</div>`;
     setDot(null);
     return;
   }
   const keep = sel.value && names.includes(sel.value) ? sel.value : names[0];
   sel.innerHTML = names.map((n) => `<option value="${esc(n)}"${n === keep ? ' selected' : ''}>${esc(n)}</option>`).join('');
-  connect(keep);
+  if (keep !== wsRepo) connect(keep);
 }
 $('#repo-pick').addEventListener('change', (e) => { if (e.target.value) connect(e.target.value); });
 
 function setDot(state) {
-  const d = $('#live-dot');
-  d.className = 'dot' + (state === true ? ' live' : state === false ? ' off' : '');
-  $('#conn-hint').textContent =
-    state === true ? 'connected' : state === false ? 'reconnecting…' : 'idle';
+  $('#live-dot').className = state === true ? 'live' : state === false ? 'off' : '';
+  const h = $('#conn-hint');
+  h.textContent = state === true ? 'live' : state === false ? 'reconnecting' : 'idle';
+  h.className = 'state' + (state === true ? ' live' : state === false ? ' off' : '');
 }
 
-const KIND = (t) =>
-  t === 'claim_acquired' ? 'claim' :
-  t === 'claim_denied' ? 'denied' :
-  t === 'path_freed' || t === 'claim_released' ? 'freed' :
-  t === 'message' ? 'msg' : 'other';
-
-const SHORT = {
-  claim_acquired: 'claim', claim_denied: 'BLOCKED', path_freed: 'freed',
-  claim_released: 'release', session_started: 'session', session_ended: 'end',
-  intent_declared: 'intent', file_written: 'write', message: 'msg',
-  ungated_write: 'UNGATED',
+const KLASS = {
+  claim_acquired: 'held', claim_denied: 'blocked', path_freed: 'wire', claim_released: 'plain',
+  message: 'wire', ungated_write: 'warn', cross_branch_overlap: 'warn',
 };
-
 const state = { claims: [], sessions: new Map(), events: [] };
 
 function detail(e) {
   switch (e.type) {
-    case 'claim_denied': return `${e.path} — held by ${e.holder_user || e.holder || '?'}`;
-    case 'intent_declared': return `"${e.text || ''}"`;
-    case 'message': return `→ ${e.to || 'all'}: ${e.text || ''}`;
+    case 'claim_denied': return `${e.path}, held by ${e.holder_user || e.holder || 'unknown'}`;
+    case 'ungated_write': return `${e.path}, over ${e.holder_user || 'a peer'}’s claim`;
+    case 'intent_declared': return `“${e.text || ''}”`;
+    case 'message': return `to ${e.to || 'all'}: ${e.text || ''}`;
     case 'session_started': return `joined on ${e.branch || 'unknown branch'}`;
     case 'session_ended': return 'left';
     default: return e.path || '';
   }
 }
-
-function pushEvent(e) {
-  state.events.push(e);
-  if (state.events.length > 400) state.events.shift();
-  drawLog();
-}
-
-/** Who an event was caused by. Some events name only a session. */
 function actor(e) {
   const direct = e.user || e.by_user || e.from_user;
   if (direct) return direct;
   const s = state.sessions.get(e.session);
-  return (s && s.user) || '—';
+  return (s && s.user) || '';
 }
-
+function rowHtml(e, live) {
+  const ts = e.ts ? new Date(e.ts).toLocaleTimeString([], { hour12: false }).slice(0, 8) : '';
+  const k = KLASS[e.type] || 'plain';
+  return `<div class="row${k === 'blocked' ? ' blocked' : ''}${live ? ' enter' : ''}">
+    <span class="t">${esc(ts)}</span><span class="u">${esc(actor(e))}</span>
+    <span class="k ${k}">${esc(e.type)}</span><span class="d">${esc(detail(e))}</span></div>`;
+}
 function drawLog() {
-  const el = $('#log');
+  const el = $('#log'), rows = $('#log-rows');
   const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   if (!state.events.length) {
-    el.innerHTML = `<div class="empty">Connected, and nothing has happened yet. Events appear here as agents work.</div>`;
+    rows.innerHTML = `<div class="empty">Connected. Nothing has happened in this repository yet. Events appear here as agents work.</div>`;
     return;
   }
-  el.innerHTML = state.events.slice(-200).map((e) => {
-    const ts = e.ts ? new Date(e.ts).toLocaleTimeString([], { hour12: false }) : '';
-    const k = KIND(e.type);
-    return `<div class="row">
-      <span class="t">${esc(ts.slice(0, 8))}</span>
-      <span class="u">${esc(actor(e))}</span>
-      <span class="k ${k}">${esc(SHORT[e.type] || e.type)}</span>
-      <span class="d">${esc(detail(e))}</span>
-    </div>`;
-  }).join('');
+  rows.innerHTML = state.events.slice(-300).map((e) => rowHtml(e, false)).join('');
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+function pushEvent(e) {
+  state.events.push(e);
+  if (state.events.length > 500) state.events.shift();
+  const el = $('#log'), rows = $('#log-rows');
+  const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  if (rows.querySelector('.empty')) rows.innerHTML = '';
+  rows.insertAdjacentHTML('beforeend', rowHtml(e, true));
+  while (rows.children.length > 300) rows.removeChild(rows.firstChild);
   if (atBottom) el.scrollTop = el.scrollHeight;
 }
 
 function drawWho() {
   const rows = [...state.sessions.values()];
   $('#who-wrap').classList.toggle('hidden', rows.length === 0);
-  const blockedPaths = new Set(
-    state.events.slice(-60).filter((e) => e.type === 'claim_denied').map((e) => e.session));
+  const blockedSessions = new Set(state.events.slice(-60).filter((e) => e.type === 'claim_denied').map((e) => e.session));
   $('#who-rows').innerHTML = rows.map((s) => {
     const holds = state.claims.filter((c) => c.session === s.session).map((c) => c.path);
-    const blocked = blockedPaths.has(s.session) && !holds.length;
+    const blocked = blockedSessions.has(s.session) && !holds.length;
     return `<tr>
-      <td class="mono" style="color:var(--cyan)">${esc(s.user || '—')}</td>
-      <td>${esc((s.intent || '—').slice(0, 60))}</td>
-      <td class="${blocked ? 'blocked' : 'holds'}">${holds.length ? esc(holds.join(', ')) : (blocked ? 'blocked' : '—')}</td>
+      <td class="who">${esc(s.user || s.session?.slice(0, 8) || '')}</td>
+      <td class="intent">${esc((s.intent || 'no stated intent yet').slice(0, 90))}</td>
+      <td class="holds${blocked ? ' blocked' : ''}">${holds.length ? holds.map((h) => `<span>${esc(h)}</span>`).join('') : (blocked ? 'blocked, waiting' : '<span class="none">nothing</span>')}</td>
     </tr>`;
   }).join('');
-
-  const claims = state.claims.length;
-  const blocked = [...blockedPaths].length;
-  $('#stats').innerHTML =
-    `<span class="pill">${rows.length} session${rows.length === 1 ? '' : 's'}</span>` +
-    `<span class="pill${claims ? ' live' : ''}">${claims} claim${claims === 1 ? '' : 's'}</span>` +
-    (blocked ? `<span class="pill dead">${blocked} blocked</span>` : '');
+  const n = rows.length, c = state.claims.length, b = blockedSessions.size;
+  $('#counts').innerHTML =
+    `<span><b>${n}</b>session${n === 1 ? '' : 's'}</span><span><b>${c}</b>claim${c === 1 ? '' : 's'}</span>` +
+    (b ? `<span class="blocked"><b>${b}</b>blocked</span>` : '');
 }
 
 async function connect(repo) {
@@ -560,17 +461,13 @@ async function connect(repo) {
   wsRepo = repo;
   if (ws) { try { ws.close(); } catch (_) {} ws = null; }
   state.claims = []; state.sessions.clear(); state.events = [];
-
-  // Backfill first, so the page is useful the moment it opens rather than
-  // only from the connection onwards.
   try {
-    const hist = await api(`/api/events?repo=${encodeURIComponent(repo)}&limit=200`);
+    const hist = await api(`/api/events?repo=${encodeURIComponent(repo)}&limit=300`);
     if (gen !== wsGen) return;
     state.events = hist;
   } catch (_) {}
-  drawLog();
+  drawLog(); drawWho();
 
-  // A browser cannot set a header on a WebSocket, hence ?token=.
   const sock = new WebSocket(`${RELAY_WS}?token=${encodeURIComponent(TOKEN)}`);
   ws = sock;
   sock.onopen = () => {
@@ -586,68 +483,44 @@ async function connect(repo) {
       state.sessions = new Map((m.sessions || []).map((s) => [s.session, s]));
       drawWho();
     } else if (m.type === 'event' && m.event) {
-      apply(m.event);
-      pushEvent(m.event);
-      drawWho();
+      apply(m.event); pushEvent(m.event); drawWho();
     }
   };
   sock.onclose = () => {
     if (gen !== wsGen) return;
     setDot(false);
-    // The relay may simply have restarted; keep trying, quietly.
     setTimeout(() => { if (gen === wsGen && wsRepo) connect(wsRepo); }, 3000);
   };
   sock.onerror = () => { if (gen === wsGen) setDot(false); };
 }
-
-/* Mirror just enough of the relay's view to render presence. */
 function apply(e) {
   switch (e.type) {
     case 'claim_acquired':
       state.claims = state.claims.filter((c) => c.path !== e.path);
       state.claims.push({ session: e.session, user: e.user, path: e.path, intent: e.intent || '' });
       break;
-    case 'claim_released':
-    case 'path_freed':
-      state.claims = state.claims.filter((c) => c.path !== e.path);
-      break;
+    case 'claim_released': case 'path_freed':
+      state.claims = state.claims.filter((c) => c.path !== e.path); break;
     case 'session_started':
-      state.sessions.set(e.session, { session: e.session, user: e.user, intent: '' });
-      break;
-    case 'intent_declared': {
-      const s = state.sessions.get(e.session);
-      if (s) s.intent = e.text || '';
-      break;
-    }
+      state.sessions.set(e.session, { session: e.session, user: e.user, intent: '' }); break;
+    case 'intent_declared': { const s = state.sessions.get(e.session); if (s) s.intent = e.text || ''; break; }
     case 'session_ended':
       state.sessions.delete(e.session);
-      state.claims = state.claims.filter((c) => c.session !== e.session);
-      break;
+      state.claims = state.claims.filter((c) => c.session !== e.session); break;
   }
 }
-
-// Repos appear as agents connect, so refresh the list periodically rather than
-// making the user reload to find their first repo.
 setInterval(async () => {
   if (!TOKEN) return;
-  try {
-    const t = await api('/api/team');
-    TEAM = t;
-    renderRepos(t.repos || []);
-  } catch (_) {}
+  try { const t = await api('/api/team'); TEAM = t; renderRepos(t.repos || []); } catch (_) {}
 }, 20000);
 
-/* --- go ------------------------------------------------------------ */
 (async () => {
   const tok = readToken();
   if (!tok) return;
-  try {
-    await open_(tok);
-  } catch (_) {
-    // A stored token that no longer works should not trap the page on a
-    // spinner: fall back to the gate with it pre-filled.
+  try { await open_(tok); }
+  catch (_) {
     $('#gate-token').value = tok;
-    $('#gate-err').textContent = 'that stored token no longer works — paste a current one';
+    $('#gate-err').textContent = 'That stored token no longer works. Paste a current one.';
     $('#gate-err').classList.remove('hidden');
   }
 })();
