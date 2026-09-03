@@ -46,10 +46,14 @@ jobs:
       - name: Package
         run: |
           install -m 0755 target/x86_64-unknown-linux-musl/release/coord coord-x86_64-linux
-          # Statically linked, or the whole point is lost.
+          # Statically linked, or the whole point — one artifact that runs on
+          # any Linux regardless of its glibc — is lost. `file` is the
+          # authority here: musl produces a static-pie, for which `ldd` prints
+          # "statically linked" rather than "not a dynamic executable", so
+          # grepping ldd fails a binary that is in fact fine.
           file coord-x86_64-linux
-          ldd coord-x86_64-linux 2>&1 | grep -q "not a dynamic executable" \
-            || { echo "binary is dynamically linked"; exit 1; }
+          file coord-x86_64-linux | grep -qE "static-pie linked|statically linked" \
+            || { echo "binary is not statically linked"; exit 1; }
           ./coord-x86_64-linux --version
           sha256sum coord-x86_64-linux > coord-x86_64-linux.sha256
           cat coord-x86_64-linux.sha256
