@@ -89,6 +89,39 @@ a header, so open the dashboard once as `https://relay.knoot.dev/?token=<token>`
 and the page remembers it.
 
 
+## knoot.dev
+
+The hosted relay has a front end: [knoot.dev](https://knoot.dev) tells the
+story, and `/app` is the team console — register, manage tokens, and watch the
+live event log for your repos.
+
+```sh
+# no email, no password. The token is the account.
+open https://knoot.dev/#start
+coord init  --relay wss://knoot.dev/ws
+coord login --relay wss://knoot.dev/ws --token <token>
+```
+
+Registration is open, which changes what a valid token is worth, so the relay
+is built accordingly:
+
+- **Tokens are stored as SHA-256 hashes.** A database dump hands over nothing
+  that works, and an existing token can never be shown to you again — only
+  replaced. Mint one per machine, so revoking one costs you nothing else.
+- **A team cannot address another team's log.** Every repo key is namespaced by
+  team id at the two places a repo is named, so two teams can both have a repo
+  called `api` and neither can read the other. `tests/teams_api.rs` asserts
+  that through the HTTP surface, not of a helper.
+- **A team is not an operator.** The lab's terminals are real shells on the
+  host, so they require the relay's own configured secret — not merely a valid
+  token.
+- **You cannot revoke your way out.** The last live token is refused, because
+  there is no recovery path and nobody to ask.
+
+The pages are embedded in the binary, so your own relay serves them too — `/`
+the site, `/app` the console, `/ops` the original single-team operator view.
+
+
 ## How it works
 
 ```
@@ -225,7 +258,7 @@ dashboard/audit surface over the event log.
 ## Tests
 
 ```sh
-cargo test          # 44 tests, ~2s
+cargo test          # 139 tests, ~4s
 ```
 
 Four layers:
@@ -236,6 +269,7 @@ Four layers:
 | Arbitration | `tests/arbitration.rs` | 400+ concurrent races → exactly one winner; conflict briefs carry holder + intent; repo isolation |
 | Failure | `tests/failure.rs` | fail-open on dead daemon, dead relay, unresponsive relay, malformed input; crash recovery via lease expiry |
 | Contract | `tests/e2e.rs` | real Claude Code hook payloads through the binary; exact deny/context JSON; latency ceiling |
+| Multi-tenancy | `tests/teams_api.rs` | registration, token minting/revocation, and that one team cannot read, list, or revoke another's anything |
 
 One test is kept **red on purpose**: `bash_write_to_a_claimed_file_is_blocked`
 (`#[ignore]`d) specifies behaviour v1 does not have. See Known gaps.

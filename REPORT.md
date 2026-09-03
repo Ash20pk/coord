@@ -229,6 +229,16 @@ Two of these (2 and 6) were caused by fixes to earlier ones. One intermediate
 fix — treating a peer's claim as evidence of authorship — suppressed the genuine
 detection case and was reverted; the honest limitation is documented instead.
 
+12. **A relay restart began again at seq 0.** Duplicate sequence numbers in
+    the one log whose purpose is to be sequenced, and every claim and session
+    forgotten — so two agents could hold the same file across a restart. Found
+    by building a dashboard and watching it show an empty repo that plainly was
+    not. Repos are now rebuilt from the durable log on first touch.
+13. **A revoked token was treated as anonymous, not refused.** On a relay with
+    no configured secret it fell through to the built-in `local` identity —
+    which is the identity that gates the lab's ptys. Found while writing the
+    test that a registered team is not an operator.
+
 Bug 11 is the pattern behind most of this list: a check that reports on the
 thing it can see rather than the thing you asked about. `coord status` exists
 because fail-open makes "off" invisible, and it was itself guessing.
