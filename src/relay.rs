@@ -32,6 +32,9 @@ struct App {
     /// Open registration needs a brake. Five teams per hour per address is
     /// generous for a human and useless for a script.
     reg_limit: crate::teams::RateLimit,
+    /// Supabase, when this relay is attached to a project. `None` on a
+    /// self-hosted relay, where agent tokens are the only credential.
+    cloud: Option<crate::cloud::Cloud>,
 }
 
 impl App {
@@ -187,6 +190,7 @@ async fn prepare_with_token(
         terms: None,
         token,
         reg_limit: crate::teams::RateLimit::new(5, 60 * 60 * 1000),
+        cloud: crate::cloud::Cloud::from_env(),
     });
     let listener = tokio::net::TcpListener::bind(listen).await?;
     Ok((listener, app))
@@ -365,7 +369,7 @@ fn urldecode(s: &str) -> Option<String> {
 /// secret (which is the `root` team), or — on a relay started with no secret
 /// at all — the built-in `local` team, because a loopback relay must keep
 /// working with no setup whatsoever.
-fn identify(
+async fn identify(
     app: &App,
     headers: &axum::http::HeaderMap,
     query: Option<&str>,
@@ -373,9 +377,36 @@ fn identify(
     let tok = presented(headers, query);
 
     if let Some(t) = tok.as_deref() {
-        let db = app.db.lock().unwrap();
-        if let Some(id) = crate::teams::resolve(&db, t) {
-            return Some(id);
+        // A machine's token. Resolved locally, with no network, because the
+        // hot path has to keep working when everything else is down.
+        {
+            let db = app.db.lock().unwrap();
+            if let Some(id) = crate::teams::resolve(&db, t) {
+                return Some(id);
+            }
+        }
+        // A person's console session. Only shapes that are actually JWTs are
+        // sent onward, so a revoked agent token is refused here rather than
+        // turning into a puzzling network error.
+        if let Some(cloud) = &app.cloud {
+            if crate::cloud::Cloud::looks_like_jwt(t) {
+                if let Some(team) = cloud.team_for_token(t).await {
+                    // The team owns rows in the local database too: repo keys
+                    // are namespaced by it, and minted tokens point at it.
+                    {
+                        let db = app.db.lock().unwrap();
+                        crate::teams::ensure_team(&db, &team.id, &team.name);
+                    }
+                    return Some(crate::teams::Identity {
+                        team_id: team.id,
+                        team_name: team.name,
+                        // A person is not a token. Nothing in the console is
+                        // "this machine", so no token row is marked as used.
+                        token_id: String::new(),
+                    });
+                }
+                return None;
+            }
         }
     }
 
@@ -407,6 +438,51 @@ fn identify(
     }
 }
 
+/// The web front end, built by Vite and embedded at compile time.
+///
+/// Keeping it inside the binary is what lets `knoot relay` serve its own
+/// console with no second deployment, no CORS configuration and no static
+/// host to keep in sync with the API it talks to.
+static WEB: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/web/dist");
+
+/// One page of the app. Missing means the front end was never built, which is
+/// a build mistake rather than a request the visitor got wrong.
+fn page(path: &str) -> axum::response::Response {
+    match WEB.get_file(path) {
+        Some(f) => Html(f.contents()).into_response(),
+        None => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "the web front end was not built into this binary — run `npm --prefix web ci && npm --prefix web run build`, then rebuild",
+        )
+            .into_response(),
+    }
+}
+
+/// Hashed build assets. The names carry a content hash, so they are safe to
+/// cache for a long time; a new build produces new names.
+async fn asset_handler(axum::extract::Path(path): axum::extract::Path<String>) -> axum::response::Response {
+    let Some(file) = WEB.get_file(format!("assets/{path}")) else {
+        return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    let mime = match path.rsplit_once('.').map(|(_, e)| e) {
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("woff2") => "font/woff2",
+        Some("png") => "image/png",
+        Some("json") => "application/json",
+        _ => "application/octet-stream",
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        file.contents(),
+    )
+        .into_response()
+}
+
 /// The caller's address for rate-limiting. Behind Caddy the socket is always
 /// loopback, so the forwarded header is the only thing that distinguishes
 /// callers; a direct connection falls back to the peer address.
@@ -426,10 +502,18 @@ fn routes(app: Arc<App>) -> Router {
         // explains the thing; `/app` is the team console; `/ops` is the
         // original single-team operator view, kept because deployments and
         // muscle memory point at it.
-        .route("/", get(|| async { Html(include_str!("site.html")) }))
-        .route("/app", get(|| async { Html(include_str!("app.html")) }))
-        .route("/ops", get(|| async { Html(include_str!("dashboard.html")) }))
-        .route("/lab", get(|| async { Html(include_str!("lab.html")) }))
+        .route("/", get(|| async { page("index.html") }))
+        .route("/docs", get(|| async { page("docs/index.html") }))
+        .route("/docs/", get(|| async { page("docs/index.html") }))
+        .route("/app", get(|| async { page("app/index.html") }))
+        .route("/app/", get(|| async { page("app/index.html") }))
+        .route("/status", get(|| async { page("status/index.html") }))
+        .route("/status/", get(|| async { page("status/index.html") }))
+        .route("/ops", get(|| async { page("ops/index.html") }))
+        .route("/ops/", get(|| async { page("ops/index.html") }))
+        .route("/lab", get(|| async { page("lab/index.html") }))
+        .route("/lab/", get(|| async { page("lab/index.html") }))
+        .route("/assets/*path", get(asset_handler))
         .route("/api/terms", get(terms_handler))
         .route("/term/ws/:idx", get(term_ws_handler))
         .route("/api/repos", get(repos_handler))
@@ -487,7 +571,7 @@ async fn team_handler(
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> axum::response::Response {
-    let Some(id) = identify(&app, &headers, uri.query()) else {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
         return unauthorized();
     };
     let db = app.db.lock().unwrap();
@@ -514,7 +598,7 @@ async fn mint_handler(
     uri: axum::http::Uri,
     Json(body): Json<MintBody>,
 ) -> axum::response::Response {
-    let Some(id) = identify(&app, &headers, uri.query()) else {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
         return unauthorized();
     };
     if id.team_id == "local" || id.team_id == "root" {
@@ -544,7 +628,7 @@ async fn revoke_handler(
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> axum::response::Response {
-    let Some(id) = identify(&app, &headers, uri.query()) else {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
         return unauthorized();
     };
     let db = app.db.lock().unwrap();
@@ -601,7 +685,7 @@ async fn terms_handler(
 ) -> axum::response::Response {
     // Same rule as the pty itself: a registered team has no business seeing
     // the operator's terminals, let alone attaching to one.
-    match identify(&app, &headers, uri.query()) {
+    match identify(&app, &headers, uri.query()).await {
         Some(id) if id.team_id == "root" || id.team_id == "local" => {}
         _ => return unauthorized(),
     }
@@ -627,7 +711,7 @@ async fn term_ws_handler(
     // A terminal is a shell on the host. If anything on this relay is gated,
     // this is — and since anyone may register a team, being authenticated is
     // not enough: only the operator's own credential reaches a pty.
-    match identify(&app, &headers, uri.query()) {
+    match identify(&app, &headers, uri.query()).await {
         Some(id) if id.team_id == "root" || id.team_id == "local" => {}
         _ => return unauthorized(),
     }
@@ -680,7 +764,7 @@ async fn repos_handler(
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> axum::response::Response {
-    let Some(id) = identify(&app, &headers, uri.query()) else {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
         return unauthorized();
     };
     let db = app.db.lock().unwrap();
@@ -707,7 +791,7 @@ async fn events_handler(
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> axum::response::Response {
-    let Some(id) = identify(&app, &headers, uri.query()) else {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
         return unauthorized();
     };
     // The client asks for `api`; storage is keyed `t_xxxx/api`. A caller
@@ -743,7 +827,7 @@ async fn ws_handler(
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> axum::response::Response {
-    let Some(id) = identify(&app, &headers, uri.query()) else {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
         return unauthorized();
     };
     ws.on_upgrade(move |sock| async move {
@@ -949,6 +1033,7 @@ mod auth_tests {
             terms: None,
             token: token.map(str::to_string),
             reg_limit: crate::teams::RateLimit::new(5, 60_000),
+            cloud: None,
         }
     }
 
@@ -958,47 +1043,47 @@ mod auth_tests {
         h
     }
 
-    fn team_of(app: &App, headers: &axum::http::HeaderMap, q: Option<&str>) -> Option<String> {
-        identify(app, headers, q).map(|i| i.team_id)
+    async fn team_of(app: &App, headers: &axum::http::HeaderMap, q: Option<&str>) -> Option<String> {
+        identify(app, headers, q).await.map(|i| i.team_id)
     }
 
-    #[test]
-    fn an_open_relay_accepts_anything_as_the_local_team() {
+    #[tokio::test]
+    async fn an_open_relay_accepts_anything_as_the_local_team() {
         let app = app_with(None);
-        assert_eq!(team_of(&app, &axum::http::HeaderMap::new(), None).as_deref(), Some("local"));
+        assert_eq!(team_of(&app, &axum::http::HeaderMap::new(), None).await.as_deref(), Some("local"));
     }
 
-    #[test]
-    fn a_token_relay_needs_the_token() {
+    #[tokio::test]
+    async fn a_token_relay_needs_the_token() {
         let app = app_with(Some("sekrit"));
         let none = axum::http::HeaderMap::new();
-        assert!(identify(&app, &none, None).is_none());
-        assert_eq!(team_of(&app, &bearer("Bearer sekrit"), None).as_deref(), Some("root"));
-        assert!(identify(&app, &bearer("Bearer nope"), None).is_none());
+        assert!(identify(&app, &none, None).await.is_none());
+        assert_eq!(team_of(&app, &bearer("Bearer sekrit"), None).await.as_deref(), Some("root"));
+        assert!(identify(&app, &bearer("Bearer nope"), None).await.is_none());
         assert!(
-            identify(&app, &bearer("sekrit"), None).is_none(),
+            identify(&app, &bearer("sekrit"), None).await.is_none(),
             "must be a Bearer token"
         );
     }
 
     /// Browsers cannot set headers on a websocket or an <img>, so the query
     /// form exists; it must be exactly as strict.
-    #[test]
-    fn the_query_form_works_and_is_just_as_strict() {
+    #[tokio::test]
+    async fn the_query_form_works_and_is_just_as_strict() {
         let app = app_with(Some("sekrit"));
         let none = axum::http::HeaderMap::new();
-        assert!(identify(&app, &none, Some("token=sekrit")).is_some());
-        assert!(identify(&app, &none, Some("repo=x&token=sekrit")).is_some());
-        assert!(identify(&app, &none, Some("token=nope")).is_none());
-        assert!(identify(&app, &none, Some("repo=x")).is_none());
-        assert!(identify(&app, &none, Some("token=sekritextra")).is_none());
+        assert!(identify(&app, &none, Some("token=sekrit")).await.is_some());
+        assert!(identify(&app, &none, Some("repo=x&token=sekrit")).await.is_some());
+        assert!(identify(&app, &none, Some("token=nope")).await.is_none());
+        assert!(identify(&app, &none, Some("repo=x")).await.is_none());
+        assert!(identify(&app, &none, Some("token=sekritextra")).await.is_none());
     }
 
-    #[test]
-    fn a_percent_encoded_query_token_still_works() {
+    #[tokio::test]
+    async fn a_percent_encoded_query_token_still_works() {
         let app = app_with(Some("a b+c"));
         let none = axum::http::HeaderMap::new();
-        assert!(identify(&app, &none, Some("token=a%20b%2Bc")).is_some());
+        assert!(identify(&app, &none, Some("token=a%20b%2Bc")).await.is_some());
     }
 
     #[test]
@@ -1011,22 +1096,22 @@ mod auth_tests {
 
     /// A registered team's token works on a relay that also has a configured
     /// secret, and resolves to that team rather than to root.
-    #[test]
-    fn a_registered_team_token_resolves_to_its_own_team() {
+    #[tokio::test]
+    async fn a_registered_team_token_resolves_to_its_own_team() {
         let app = app_with(Some("sekrit"));
         let (id, tok) = {
             let db = app.db.lock().unwrap();
             crate::teams::create_team(&db, "Acme").unwrap()
         };
-        let got = identify(&app, &bearer(&format!("Bearer {}", tok.secret)), None).unwrap();
+        let got = identify(&app, &bearer(&format!("Bearer {}", tok.secret)), None).await.unwrap();
         assert_eq!(got.team_id, id.team_id);
         assert_ne!(got.team_id, "root");
     }
 
     /// The property the whole multi-team story rests on: two teams naming the
     /// same repo address different storage keys.
-    #[test]
-    fn two_teams_naming_one_repo_never_share_a_log() {
+    #[tokio::test]
+    async fn two_teams_naming_one_repo_never_share_a_log() {
         let app = app_with(None);
         let (a, ta) = {
             let db = app.db.lock().unwrap();
@@ -1036,8 +1121,8 @@ mod auth_tests {
             let db = app.db.lock().unwrap();
             crate::teams::create_team(&db, "B").unwrap()
         };
-        let ia = identify(&app, &bearer(&format!("Bearer {}", ta.secret)), None).unwrap();
-        let ib = identify(&app, &bearer(&format!("Bearer {}", tb.secret)), None).unwrap();
+        let ia = identify(&app, &bearer(&format!("Bearer {}", ta.secret)), None).await.unwrap();
+        let ib = identify(&app, &bearer(&format!("Bearer {}", tb.secret)), None).await.unwrap();
         assert_eq!(ia.team_id, a.team_id);
         assert_eq!(ib.team_id, b.team_id);
         assert_ne!(ia.scope("api"), ib.scope("api"));
@@ -1046,22 +1131,22 @@ mod auth_tests {
     /// Registration is open, so a stranger holding a valid team token must not
     /// thereby hold a shell on the host. Only the operator's own credential
     /// reaches the lab.
-    #[test]
-    fn a_registered_team_is_not_an_operator() {
+    #[tokio::test]
+    async fn a_registered_team_is_not_an_operator() {
         let app = app_with(Some("sekrit"));
         let (_, tok) = {
             let db = app.db.lock().unwrap();
             crate::teams::create_team(&db, "Stranger").unwrap()
         };
-        let id = identify(&app, &bearer(&format!("Bearer {}", tok.secret)), None).unwrap();
+        let id = identify(&app, &bearer(&format!("Bearer {}", tok.secret)), None).await.unwrap();
         assert!(
             id.team_id != "root" && id.team_id != "local",
             "a registered team must not pass the operator check that gates ptys"
         );
     }
 
-    #[test]
-    fn a_revoked_token_is_refused_not_downgraded() {
+    #[tokio::test]
+    async fn a_revoked_token_is_refused_not_downgraded() {
         let app = app_with(None);
         let (id, first) = {
             let db = app.db.lock().unwrap();
@@ -1076,7 +1161,7 @@ mod auth_tests {
         // else would let a revoked token keep opening a console, and hand it
         // the identity that gates the lab's terminals.
         assert!(
-            identify(&app, &bearer(&format!("Bearer {}", first.secret)), None).is_none(),
+            identify(&app, &bearer(&format!("Bearer {}", first.secret)), None).await.is_none(),
             "a revoked token must be refused outright, not treated as anonymous"
         );
     }

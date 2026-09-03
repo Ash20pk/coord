@@ -1,4 +1,5 @@
 pub mod bashparse;
+pub mod cloud;
 pub mod config;
 pub mod daemon;
 pub mod hook;

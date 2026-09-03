@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>knoot docs</title>
+<meta name="description" content="Install knoot, enrol a repository, wire up any agent, run your own relay, and read the hook protocol.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wdth,wght@0,75..100,400..700;1,75..100,400..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script type="module" crossorigin src="/assets/docs-DkKSwXJJ.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/modulepreload-polyfill-P2Xu9kJm.js">
+  <link rel="modulepreload" crossorigin href="/assets/relay-c9r9f4_p.js">
+  <link rel="stylesheet" crossorigin href="/assets/relay-FXwTmpsr.css">
+  <link rel="stylesheet" crossorigin href="/assets/docs-CjMRs99a.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="/">knoot</a>
+    <nav>
+      <a href="/#problem">Why</a>
+      <a href="/#how">How it works</a>
+      <a href="/docs/" aria-current="page">Docs</a>
+      <a href="/status/">Status</a>
+    </nav>
+    <div class="right">
+      <a href="/app/">Sign in</a>
+      <a class="btn sm" href="/app/#signup">Start free</a>
+    </div>
+  </div>
+</header>
+
+<div class="docs">
+  <nav class="toc" id="toc">
+    <h4>Start</h4>
+    <a href="#install">Install</a>
+    <a href="#enrol">Enrol a repository</a>
+    <a href="#verify">Verify it is on</a>
+    <h4>Use it</h4>
+    <a href="#agents">Wire up an agent</a>
+    <a href="#cli">Command reference</a>
+    <a href="#messaging">Messages and notifications</a>
+    <h4>Run it</h4>
+    <a href="#hosted">The hosted relay</a>
+    <a href="#selfhost">Your own relay</a>
+    <a href="#backups">Backups</a>
+    <h4>Reference</h4>
+    <a href="#protocol">Hook protocol</a>
+    <a href="#events">Event types</a>
+    <a href="#limits">Known limits</a>
+  </nav>
+
+  <main class="doc">
+    <h1>Documentation</h1>
+    <p class="intro">
+      knoot coordinates several coding agents working one repository. Agents claim
+      files before writing them, hold them on a short lease, and are handed the
+      holder's identity and intent when a file is busy.
+    </p>
+
+    <section id="install">
+      <h2>Install</h2>
+      <p>One binary provides the relay, the daemon, the hook shim and the CLI. Install it on every machine that runs agents.</p>
+      <div class="cmd-row"><code>cargo install --git https://github.com/Ash20pk/knoot</code><button class="copy" type="button">Copy</button></div>
+      <p>Prebuilt static Linux binaries are attached to the <code>nightly</code> release on GitHub. macOS builds from source.</p>
+      <div class="callout">
+        <p>The hooks call <code>knoot</code> by name so they resolve on every machine that has it on <code>PATH</code>. If yours lives somewhere unusual, set <code>KNOOT_BIN</code>.</p>
+      </div>
+    </section>
+
+    <section id="enrol">
+      <h2>Enrol a repository</h2>
+      <p>Run this once per repository. It writes <code>.knoot.toml</code> and the hook configuration, both of which are meant to be committed, so anyone who clones the repository is enrolled with no setup.</p>
+      <div class="cmd-row"><code id="c-init">knoot init --relay wss://knoot.dev/ws</code><button class="copy" type="button">Copy</button></div>
+      <p>Then, once per machine, store the agent token and run the daemon.</p>
+      <div class="cmd-row"><code id="c-login">knoot login --relay wss://knoot.dev/ws --token &lt;token&gt;</code><button class="copy" type="button">Copy</button></div>
+      <div class="cmd-row"><code>knoot daemon</code><button class="copy" type="button">Copy</button></div>
+      <div class="callout warn">
+        <p>Tokens deliberately do not live in <code>.knoot.toml</code>. That file is committed, and a secret must never ride along with it. Credentials go to <code>~/.knoot/credentials.toml</code> at mode 0600, or the <code>KNOOT_TOKEN</code> environment variable for CI.</p>
+      </div>
+    </section>
+
+    <section id="verify">
+      <h2>Verify it is on</h2>
+      <p>knoot fails open, so from inside an agent a broken install looks exactly like a quiet one. <code>knoot status</code> is how a person tells the difference.</p>
+      <div class="term">
+        <div class="bar"><span class="cmd">knoot status</span><span class="real">real output</span></div>
+<pre><span class="g">[ok  ]</span> binary    /usr/local/bin/knoot
+<span class="g">[ok  ]</span> repo      ~/project <span class="d">(id: repo-fade58f512a66c42)</span>
+<span class="g">[ok  ]</span> hooks     6 events, resolved from PATH
+<span class="g">[ok  ]</span> daemon    responding
+<span class="g">[ok  ]</span> relay     wss://knoot.dev/ws <span class="d">(token: present)</span>
+
+coordination is on.</pre>
+      </div>
+      <p>Anything less than that prints what is wrong and the command that fixes it.</p>
+    </section>
+
+    <section id="agents">
+      <h2>Wire up an agent</h2>
+      <p>knoot never talks to a model. It reads a JSON payload on stdin and answers on stdout, so anything that can run a command before it writes a file can be coordinated.</p>
+
+      <h3>Claude Code</h3>
+      <p><code>knoot init</code> writes the hook configuration for you, into <code>.claude/settings.json</code> in the repository. Restart any sessions that were already open.</p>
+
+      <h3>Any other agent</h3>
+      <p>Call the shim yourself before each write and honour the answer. It is the same code path the built-in integration uses.</p>
+      <div class="term">
+        <div class="bar"><span class="cmd">your agent, before writing a file</span></div>
+<pre>echo '{"hook_event_name":"PreToolUse",
+       "session_id":"'"$SESSION"'",
+       "cwd":"'"$PWD"'",
+       "tool_name":"Edit",
+       "tool_input":{"file_path":"src/auth.js"}}' \
+  | knoot hook</pre>
+      </div>
+      <p>A permitted write produces no decision. A refused one returns <code>permissionDecision: "deny"</code> and a reason string meant to be put straight into the model's context. Feed that string back to the model rather than summarising it: naming the holder and their intent is what makes an agent re-plan instead of retry.</p>
+
+      <h3>People</h3>
+      <p>Developers collide with agents too. Wrapping <code>$EDITOR</code> in the same call puts a person in the same log, holding leases the same way.</p>
+    </section>
+
+    <section id="cli">
+      <h2>Command reference</h2>
+      <table>
+        <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td><code>knoot init</code></td><td>Enrol the current repository. Writes <code>.knoot.toml</code> and hook config.</td></tr>
+          <tr><td><code>knoot login</code></td><td>Store an agent token for a relay, in <code>~/.knoot/credentials.toml</code>.</td></tr>
+          <tr><td><code>knoot daemon</code></td><td>Run the local claim mirror. One per machine.</td></tr>
+          <tr><td><code>knoot relay</code></td><td>Run a relay: sequenced log, claims, arbitration.</td></tr>
+          <tr><td><code>knoot status</code></td><td>Check binary, repository, hooks, daemon, relay and token.</td></tr>
+          <tr><td><code>knoot who</code></td><td>Active sessions, their stated intent, and what they hold.</td></tr>
+          <tr><td><code>knoot watch</code></td><td>Live dashboard of sessions, claims and collisions.</td></tr>
+          <tr><td><code>knoot msg</code></td><td>Send a note to one peer or to everyone.</td></tr>
+          <tr><td><code>knoot inbox</code></td><td>Read and clear pending notes for this user.</td></tr>
+          <tr><td><code>knoot hook</code></td><td>The shim. Reads a hook payload on stdin.</td></tr>
+        </tbody>
+      </table>
+      <div class="term">
+        <div class="bar"><span class="cmd">knoot who</span><span class="real">real output</span></div>
+<pre>priya        main   <span class="d">"Add refreshSession() to the auth module"</span>      51s ago
+             └─ <span class="g">src/tokens.js (lease 9m)</span>
+sam          main   <span class="d">-</span>                                             51s ago
+ash          main   <span class="d">"Refactor session handling to use short-lived tokens"</span> 64s ago
+             └─ <span class="g">src/auth.js (lease 8m)</span></pre>
+      </div>
+    </section>
+
+    <section id="messaging">
+      <h2>Messages and notifications</h2>
+      <p>Blocking alone is not coordination. Being denied a path registers interest in it. When the holder releases it, by finishing, ending, or letting the lease lapse, every waiter is told, along with what the holder was doing.</p>
+      <p>Delivery rides the turn-end hook, so notice arrives the moment an agent tries to stop rather than whenever a person next types. A per-user cap means a chatty peer can never keep a session spinning.</p>
+      <p>Agents also write to each other directly.</p>
+      <div class="cmd-row"><code>knoot msg priya "auth.js is yours, exports are stable"</code><button class="copy" type="button">Copy</button></div>
+      <div class="cmd-row"><code>knoot msg all "goal is green, stop editing"</code><button class="copy" type="button">Copy</button></div>
+      <p>Identity comes from <code>KNOOT_USER</code>, falling back to <code>$USER</code>. Set it per session to give agents readable names in conflict briefs.</p>
+    </section>
+
+    <section id="hosted">
+      <h2>The hosted relay</h2>
+      <p>Sign in to the console, create a team, and mint one agent token per machine. Tokens are stored as hashes, so an existing one can never be shown again, only replaced.</p>
+      <p>The console shows the live event log for every repository your team has connected, which is also the fastest way to confirm coordination is really on.</p>
+    </section>
+
+    <section id="selfhost">
+      <h2>Your own relay</h2>
+      <p>The relay is one command. Unauthenticated is right for <code>127.0.0.1</code> and wrong for anything else, so give it a shared secret and it requires one.</p>
+      <div class="cmd-row"><code>KNOOT_RELAY_TOKEN=$(openssl rand -hex 24) knoot relay --listen 0.0.0.0:7420</code><button class="copy" type="button">Copy</button></div>
+      <p>Use <code>wss://</code> off-machine. A bearer token over plaintext is a token anyone on the path can take. Terminate TLS with a proxy in front of the relay.</p>
+      <div class="callout">
+        <p>A relay that refuses you still fails open. A rejected token means coordination is off, not that anyone is blocked: the daemon says so once on stderr, and every edit is allowed. An operator's mistake cannot become an outage for the team.</p>
+      </div>
+      <p>The <code>deploy/</code> directory provisions a relay on a fresh Ubuntu host: TLS terminated by Caddy in front of a loopback-bound relay, systemd keeping it up, and a token generated on the box rather than in the repository.</p>
+    </section>
+
+    <section id="backups">
+      <h2>Backups</h2>
+      <p>The event log is the product, so it is protected in two layers that fail differently.</p>
+      <ul>
+        <li><strong>Nightly snapshots on the box.</strong> A <code>sqlite3 .backup</code>, never <code>cp</code>, which half-copies a write-ahead database into one that restores as corrupt. Gzipped, seven kept. This covers a bad delete or a corrupted page.</li>
+        <li><strong>Continuous replication off the box</strong> via Litestream, which covers losing the host: ten seconds of loss rather than a day. It needs object-storage credentials, so it turns itself on only once they exist and says so loudly while it is off.</li>
+      </ul>
+    </section>
+
+    <section id="protocol">
+      <h2>Hook protocol</h2>
+      <p>Every payload is a single JSON object on stdin. The fields knoot reads:</p>
+      <table>
+        <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>hook_event_name</code></td><td>One of <code>SessionStart</code>, <code>UserPromptSubmit</code>, <code>PreToolUse</code>, <code>PostToolUse</code>, <code>Stop</code>, <code>SessionEnd</code>.</td></tr>
+          <tr><td><code>session_id</code></td><td>Stable identifier for this agent session. Distinguishes two sessions run by the same person.</td></tr>
+          <tr><td><code>cwd</code></td><td>Absolute path inside the enrolled repository.</td></tr>
+          <tr><td><code>tool_name</code></td><td><code>Edit</code>, <code>Write</code> or <code>Bash</code>. Others are ignored.</td></tr>
+          <tr><td><code>tool_input.file_path</code></td><td>The file about to be written.</td></tr>
+          <tr><td><code>tool_input.command</code></td><td>For <code>Bash</code>: the command line, parsed for write targets.</td></tr>
+          <tr><td><code>prompt</code></td><td>On <code>UserPromptSubmit</code>: summarised into the intent sentence peers are shown.</td></tr>
+        </tbody>
+      </table>
+      <p>A refusal comes back as <code>hookSpecificOutput.permissionDecision: "deny"</code> with a <code>permissionDecisionReason</code> string. <code>SessionStart</code> instead returns <code>additionalContext</code>, listing the other active sessions and what changed under you since your last turn.</p>
+      <div class="term">
+        <div class="bar"><span class="cmd">SessionStart</span><span class="real">additionalContext, real output</span></div>
+<pre>knoot: 2 other active session(s) on this repo right now:
+- priya on branch main — <span class="d">"Add refreshSession() to the auth module"</span>
+  [working in: src/tokens.js]
+- ash on branch main — <span class="d">"Refactor session handling to use short-lived tokens"</span>
+  [working in: src/auth.js]
+Avoid editing files they are working in; you will be blocked with
+details if you try, and told automatically when a file you were
+blocked on is released.</pre>
+      </div>
+      <div class="callout warn">
+        <p>Shell writes are gated too, or the scheme would be optional. Redirects, heredoc targets, <code>tee</code>, <code>sed -i</code>, <code>cp</code>, <code>mv</code>, <code>rm</code> and <code>dd of=</code> are parsed out and checked. Quoting is respected and heredoc bodies are skipped.</p>
+      </div>
+    </section>
+
+    <section id="events">
+      <h2>Event types</h2>
+      <p>One sequenced log per repository. These are the types you will see in the console and in <code>knoot watch</code>.</p>
+      <table>
+        <thead><tr><th>Event</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>session_started</code></td><td>An agent joined, with its branch.</td></tr>
+          <tr><td><code>intent_declared</code></td><td>The sentence peers are shown when they are blocked.</td></tr>
+          <tr><td><code>claim_acquired</code></td><td>A file was taken on a lease.</td></tr>
+          <tr><td><code>claim_denied</code></td><td>Someone asked for a held file and was given a brief.</td></tr>
+          <tr><td><code>file_written</code></td><td>A permitted write landed.</td></tr>
+          <tr><td><code>claim_released</code></td><td>The holder let a file go.</td></tr>
+          <tr><td><code>path_freed</code></td><td>A lease lapsed; waiters were notified.</td></tr>
+          <tr><td><code>message</code></td><td>An agent wrote to a peer or to everyone.</td></tr>
+          <tr><td><code>ungated_write</code></td><td>A write knoot could not gate landed on someone's claim. Detection, not prevention.</td></tr>
+          <tr><td><code>session_ended</code></td><td>An agent left; its claims were dropped.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="limits">
+      <h2>Known limits</h2>
+      <ul>
+        <li><strong>Interpreters are detected, not blocked.</strong> <code>python3 -c "open(...)"</code> writes first and is recorded second.</li>
+        <li><strong>Attribution under concurrent writes is inferred.</strong> The working tree is shared, so a peer's edit lands inside our audit window too. Authorship comes from their <code>file_written</code> event; if that has not arrived, an ungated write can be attributed to the wrong session.</li>
+        <li><strong>Sessions sharing a name share a mailbox.</strong> Mail is keyed by user, so two sessions running as the same <code>KNOOT_USER</code> both receive its notes.</li>
+        <li><strong>Fail-open is ambiguous by design.</strong> An allowed edit and an unreachable daemon look identical from the agent's side. Check <code>knoot status</code>.</li>
+      </ul>
+    </section>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="wrap">
+    <a class="brand" href="/">knoot</a>
+    <a href="/docs/">Docs</a>
+    <a href="/status/">Status</a>
+    <a href="/app/">Console</a>
+    <a href="https://github.com/Ash20pk/knoot">GitHub</a>
+    <span class="relay" id="relay-line"></span>
+  </div>
+</footer>
+
+</body>
+</html>

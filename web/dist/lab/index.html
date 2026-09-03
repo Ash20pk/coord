@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>knoot lab</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wdth,wght@75..100,400..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css">
+  <script type="module" crossorigin src="/assets/lab-DZsy1rgv.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/modulepreload-polyfill-P2Xu9kJm.js">
+  <link rel="stylesheet" crossorigin href="/assets/lab-BTRKWbNE.css">
+</head>
+<body>
+<header>
+  <div class="brand">knoot <span>lab</span></div>
+  <span class="repo" id="repo"></span>
+  <a class="link" href="/ops">Operator view</a>
+  <div class="counts">
+    <span class="conn" id="dot">connecting</span>
+    <span><b id="s-claims">0</b>claims</span>
+    <span><b id="s-writes">0</b>writes</span>
+    <span id="w-blocked"><b id="s-blocked">0</b>blocked</span>
+    <span id="w-ungated"><b id="s-ungated">0</b>ungated</span>
+  </div>
+</header>
+
+<main>
+  <div id="terms"></div>
+  <aside>
+    <h2>Ledger <span id="live-tag" class="tag"></span></h2>
+    <div id="feed"><div class="empty">Waiting for activity.</div></div>
+    <div class="hint">Click a terminal to type. Give both agents the same file to see a block.</div>
+  </aside>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm-addon-fit/0.8.0/xterm-addon-fit.min.js"></script>
+</body>
+</html>

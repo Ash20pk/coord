@@ -24,6 +24,12 @@ uuid = { version = "1", features = ["v4"] }
 toml = "0.8"
 terminal_size = "0.3"
 portable-pty = "0.8"
+# The console signs people in with Supabase, which means one outbound HTTPS
+# call to verify an access token. rustls is already in the tree for wss://.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+# The web app is built by Vite and embedded, so the relay is still one binary
+# serving its own front end with no second deploy and no CORS.
+include_dir = "0.7"
 
 [profile.release]
 lto = true

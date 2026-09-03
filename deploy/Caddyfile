@@ -17,7 +17,7 @@ knoot.dev, www.knoot.dev {
 		# The pages load three things from elsewhere: three.js from cdnjs and
 		# fonts from Google. Everything else is same-origin, so say so —
 		# `connect-src` covers the relay's own websocket.
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' wss://knoot.dev wss://relay.knoot.dev; frame-ancestors 'none'; base-uri 'none'"
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' wss://knoot.dev wss://relay.knoot.dev https://*.supabase.co wss://*.supabase.co; frame-ancestors 'none'; base-uri 'none'"
 		X-Content-Type-Options nosniff
 		Referrer-Policy no-referrer
 		# A token in a URL must never travel to another site in a Referer.

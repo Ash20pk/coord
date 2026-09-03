@@ -1,102 +1,3 @@
-<!--
-  knoot /ops — the operator's single-relay view.
-
-  Same instrument surface as the console, without the team plumbing: pick a
-  repository, see who is active and what they hold, watch the ledger.
--->
-<!doctype html>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>knoot operator view</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wdth,wght@75..100,400..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
-<style>
-  :root {
-    --bg: #12161a; --panel: #171c21; --panel-2: #1d232a; --rule: #2b3238; --rule-2: #222830;
-    --text: #e8ecef; --text-2: #aab2ba; --dim: #7d868f;
-    --held: #19a974; --blocked: #ff4a1f; --wire: #3b7bff; --warn: #f0b429;
-    --sans: 'Instrument Sans', system-ui, sans-serif;
-    --mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
-  code { font-family: var(--mono); font-size: .93em; }
-  header { display: flex; align-items: center; gap: 20px; height: 52px; padding: 0 20px; border-bottom: 1px solid var(--rule); background: var(--panel); position: sticky; top: 0; z-index: 5; }
-  .brand { font-weight: 600; font-size: 17px; display: flex; align-items: center; gap: 9px; }
-  .brand i { width: 9px; height: 9px; border-radius: 50%; background: var(--blocked); display: inline-block; transition: background .3s; }
-  .brand i.on { background: var(--held); }
-  .brand span { color: var(--text-2); font-weight: 400; font-size: 14px; }
-  select { font: 13px var(--mono); color: var(--text); background: var(--bg); border: 1px solid var(--rule); border-radius: 3px; padding: 6px 10px; }
-  select:focus { outline: none; border-color: var(--wire); }
-  .counts { margin-left: auto; display: flex; gap: 22px; font-size: 13.5px; color: var(--text-2); font-variant-numeric: tabular-nums; }
-  .counts b { font-weight: 500; color: var(--text); font-family: var(--mono); margin-right: 5px; }
-  .counts .hot b { color: var(--blocked); } .counts .warn b { color: var(--warn); }
-
-  main { display: grid; grid-template-columns: minmax(340px, 2fr) minmax(420px, 3fr); min-height: calc(100vh - 52px); }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
-  section { min-width: 0; }
-  section + section { border-left: 1px solid var(--rule); }
-  @media (max-width: 900px) { section + section { border-left: 0; border-top: 1px solid var(--rule); } }
-  h2 { margin: 0; padding: 12px 20px; font-size: 15px; font-weight: 500; border-bottom: 1px solid var(--rule); display: flex; gap: 10px; align-items: baseline; }
-  h2 .tag { font-size: 13px; color: var(--dim); font-weight: 400; }
-  h2 .tag.live { color: var(--held); }
-
-  .sess { padding: 14px 20px; border-bottom: 1px solid var(--rule-2); }
-  .sess-top { display: flex; align-items: baseline; gap: 10px; }
-  .who { font-family: var(--mono); font-size: 14px; }
-  .sid { color: var(--dim); font-size: 12.5px; font-family: var(--mono); }
-  .branch { margin-left: auto; color: var(--dim); font-size: 13px; font-family: var(--mono); }
-  .intent { color: var(--text-2); margin: 4px 0 8px; overflow-wrap: anywhere; }
-  .intent.none { color: var(--dim); }
-  .holds { display: flex; flex-wrap: wrap; gap: 6px 14px; font-family: var(--mono); font-size: 12.5px; }
-  .chip { color: var(--held); }
-  .chip .t { color: var(--dim); margin-left: 6px; }
-  .chip.idle { color: var(--dim); font-family: var(--sans); font-size: 14px; }
-
-  #feed { max-height: calc(100vh - 52px - 46px); overflow-y: auto; font-family: var(--mono); font-size: 12.5px; }
-  .ev { display: grid; grid-template-columns: 76px 84px 130px 1fr; gap: 14px; padding: 6px 20px; border-bottom: 1px solid var(--rule-2); color: var(--text-2); align-items: baseline; font-variant-numeric: tabular-nums; }
-  .ev time { color: var(--dim); }
-  .ev .u { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .ev .k { font-weight: 500; }
-  .ev .d { overflow-wrap: anywhere; }
-  .ev.new { animation: rowin .5s ease-out; }
-  @keyframes rowin { from { background: var(--panel-2); } to { background: transparent; } }
-  .k.claim { color: var(--held); } .k.blocked { color: var(--blocked); } .k.ungated, .k.merge { color: var(--warn); }
-  .k.joined, .k.freed { color: var(--wire); } .k.wrote, .k.intent, .k.left, .k.released { color: var(--text-2); }
-  .ev.blocked { background: rgba(255,74,31,.06); }
-  .ev.ungated { background: rgba(240,180,41,.06); }
-  .empty { padding: 30px 20px; color: var(--text-2); font-size: 14.5px; max-width: 52ch; line-height: 1.6; }
-  .empty code { color: var(--text); }
-  footer { padding: 10px 20px; color: var(--dim); font-size: 13px; border-top: 1px solid var(--rule); font-family: var(--mono); }
-  @media (prefers-reduced-motion: reduce) { .ev.new { animation: none; } }
-</style>
-
-<header>
-  <div class="brand"><i id="dot"></i>knoot <span>operator view</span></div>
-  <select id="repo" aria-label="Repository"></select>
-  <div class="counts">
-    <span><b id="s-sessions">0</b>sessions</span>
-    <span><b id="s-claims">0</b>claims</span>
-    <span><b id="s-writes">0</b>writes</span>
-    <span id="w-blocked"><b id="s-blocked">0</b>blocked</span>
-    <span id="w-ungated"><b id="s-ungated">0</b>ungated</span>
-  </div>
-</header>
-
-<main>
-  <section>
-    <h2>Active sessions</h2>
-    <div id="sessions"><div class="empty">No active sessions.</div></div>
-  </section>
-  <section>
-    <h2>Ledger <span class="tag" id="live-tag">connecting</span></h2>
-    <div id="feed"><div class="empty">Waiting for activity.</div></div>
-  </section>
-</main>
-<footer id="foot">connecting</footer>
-
-<script>
 // A hosted relay requires a token. A browser cannot set headers on these,
 // so it travels as ?token=, taken from this page's own URL and remembered
 // so a reload does not need it again.
@@ -142,7 +43,7 @@ async function history() {
 function connect() {
   ws = new WebSocket(withTok((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws'));
   ws.onopen = () => {
-    $('dot').classList.add('on');
+    $('dot').classList.add('on'); $('dot').textContent = 'live';
     $('live-tag').textContent = 'live'; $('live-tag').className = 'tag live';
     $('foot').textContent = 'live  ' + repo;
     ws.send(JSON.stringify({ type: 'hello', repo, daemon: 'web' }));
@@ -156,7 +57,7 @@ function connect() {
     } else if (msg.type === 'event') { apply(msg.event, true); render(); }
   };
   ws.onclose = () => {
-    $('dot').classList.remove('on');
+    $('dot').classList.remove('on'); $('dot').textContent = 'reconnecting';
     $('live-tag').textContent = 'reconnecting'; $('live-tag').className = 'tag';
     $('foot').textContent = 'disconnected, retrying';
     setTimeout(connect, 2000);
@@ -233,4 +134,3 @@ function render() {
 }
 setInterval(render, 1000);
 boot();
-</script>

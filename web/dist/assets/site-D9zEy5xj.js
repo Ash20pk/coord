@@ -1,0 +1,1 @@
+import"./modulepreload-polyfill-P2Xu9kJm.js";import{i as e,t}from"./relay-c9r9f4_p.js";var n=document.querySelector(`#relay-line`);n&&(n.textContent=`relay ${t}`),e();

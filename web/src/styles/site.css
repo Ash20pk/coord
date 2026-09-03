@@ -1,0 +1,91 @@
+/* Marketing site layout. Tokens come from tokens.css. */
+
+h1 { font-variation-settings: 'wdth' 82; font-size: clamp(42px, 5.4vw, 76px); line-height: .98; text-wrap: balance; }
+h2 { font-variation-settings: 'wdth' 84; font-size: clamp(28px, 3.2vw, 42px); line-height: 1.06; text-wrap: balance; }
+h3 { font-size: 18px; line-height: 1.3; }
+.small { font-size: 15px; }
+.sec-head { max-width: 62ch; margin-bottom: 44px; }
+.sec-head p { margin-top: 16px; }
+
+/* ---------- hero ---------- */
+.hero { padding: 64px 0 8px; }
+.hero h1 { grid-column: 1 / 8; }
+.hero-side { grid-column: 8 / 13; align-self: end; padding-bottom: 6px; }
+.lede { font-size: 17.5px; line-height: 1.55; color: var(--ink); }
+.hero-actions { display: flex; gap: 10px; margin-top: 22px; flex-wrap: wrap; }
+.hero-note { margin-top: 12px; font-size: 14px; color: var(--ink-2); }
+.hero-term { grid-column: 1 / -1; margin-top: 48px; display: grid; grid-template-columns: 1fr 1.35fr; gap: 20px; }
+
+/* ---------- problem ---------- */
+.problem { padding: 96px 0; }
+.p-copy { grid-column: 1 / 7; }
+.p-copy p { margin-top: 18px; color: var(--ink-2); }
+.p-facts { grid-column: 8 / 13; margin: 0; align-self: start; }
+.p-facts > div { display: grid; grid-template-columns: 92px 1fr; gap: 18px; padding: 16px 0; border-top: 1px solid var(--rule); }
+.p-facts > div:first-child { border-top: 0; padding-top: 0; }
+.p-facts dt { font-weight: 500; }
+.p-facts dd { margin: 0; color: var(--ink-2); font-size: 15.5px; }
+
+/* ---------- the brief ---------- */
+.brief-show { padding: 0 0 96px; }
+.bs-copy { grid-column: 1 / 6; align-self: center; }
+.bs-copy p { margin-top: 18px; color: var(--ink-2); }
+.bs-term { grid-column: 6 / 13; display: flex; flex-direction: column; gap: 16px; }
+
+/* ---------- agents ---------- */
+.agents { padding: 96px 0; border-top: 1px solid var(--rule); }
+.agent-grid { display: grid; grid-template-columns: repeat(4, 1fr); column-gap: 24px; border-top: 1px solid var(--ink); }
+.agent-grid > div { padding-top: 20px; }
+.agent-grid p { margin-top: 8px; color: var(--ink-2); font-size: 15px; }
+.agent-grid code { font-size: 13px; color: var(--ink); }
+
+/* ---------- how ---------- */
+.how { padding: 96px 0; border-top: 1px solid var(--rule); }
+.how-copy { grid-column: 1 / 6; }
+.how-copy p { margin-top: 18px; }
+.how-cta { margin-top: 24px; }
+.how-fig { grid-column: 6 / 13; }
+.how-fig svg { width: 100%; height: auto; display: block; }
+.how-fig text { font-family: var(--sans); font-size: 14px; fill: var(--ink); }
+.how-fig .sub { font-size: 12.5px; fill: var(--ink-2); }
+.how-fig .dark-sub { font-size: 12.5px; fill: var(--panel-dim); }
+.how-fig .m { font-family: var(--mono); font-size: 12px; fill: var(--ink-2); }
+.how-fig .box { fill: var(--paper); stroke: var(--ink); stroke-width: 1.2; }
+.how-fig .box.you { fill: var(--paper-2); }
+.how-fig .box.dark { fill: var(--panel); stroke: var(--panel); }
+.how-fig .dark-t { fill: var(--panel-text); }
+.how-fig .link { stroke: var(--ink); stroke-width: 1.2; fill: none; }
+.how-fig .bracket { stroke: var(--ink-3); stroke-width: 1; fill: none; }
+.how-parts { grid-column: 1 / -1; margin-top: 60px; display: grid; grid-template-columns: repeat(4, 1fr); column-gap: 24px; }
+.how-parts > div { padding-top: 20px; border-top: 1px solid var(--ink); }
+.how-parts p { margin-top: 8px; color: var(--ink-2); font-size: 15px; }
+.how-parts code { font-size: 13px; color: var(--ink); }
+
+/* ---------- promises ---------- */
+.promises { padding: 96px 0; border-top: 1px solid var(--rule); }
+.pr-head { grid-column: 1 / 5; }
+.pr-head p { margin-top: 18px; }
+.pr-list { grid-column: 5 / 13; margin: 0; }
+.pr-list > div { display: grid; grid-template-columns: 1fr 1.6fr; gap: 24px; padding: 22px 0; border-top: 1px solid var(--rule); }
+.pr-list > div:first-child { border-top: 0; padding-top: 0; }
+.pr-list dt { font-size: 19px; font-weight: 500; line-height: 1.3; letter-spacing: -.01em; }
+.pr-list dd { margin: 0; color: var(--ink-2); }
+.pr-list dd code { color: var(--ink); }
+
+/* ---------- close ---------- */
+.close { padding: 90px 0 100px; border-top: 1px solid var(--rule); }
+.close h2 { max-width: 18ch; }
+.close-actions { display: flex; gap: 10px; margin-top: 26px; flex-wrap: wrap; }
+
+@media (max-width: 1000px) {
+  .hero h1, .hero-side, .p-copy, .p-facts, .bs-copy, .bs-term,
+  .how-copy, .how-fig, .pr-head, .pr-list { grid-column: 1 / -1; }
+  .hero-side, .p-facts, .bs-term, .how-fig, .pr-list { margin-top: 32px; }
+  .hero-term { grid-template-columns: 1fr; }
+  .agent-grid, .how-parts { grid-template-columns: 1fr 1fr; row-gap: 28px; }
+  .pr-list > div { grid-template-columns: 1fr; gap: 8px; }
+}
+@media (max-width: 640px) {
+  .agent-grid, .how-parts { grid-template-columns: 1fr; }
+  .p-facts > div { grid-template-columns: 1fr; gap: 4px; }
+}

@@ -118,21 +118,24 @@ nothing and reports success.
 
 ## knoot.dev
 
-The hosted relay has a front end: [knoot.dev](https://knoot.dev) tells the
-story, and `/app` is the team console — register, manage tokens, and watch the
-live event log for your repos.
+The hosted relay has a front end: [knoot.dev](https://knoot.dev) is the site,
+`/docs` the documentation, `/status` a live health check, and `/app` the team
+console — sign in, manage agent tokens, and watch the live event log.
 
 ```sh
-# no email, no password. The token is the account.
-open https://knoot.dev/#start
+open https://knoot.dev/app/#signup      # email and password, for a person
 knoot init  --relay wss://knoot.dev/ws
-knoot login --relay wss://knoot.dev/ws --token <token>
+knoot login --relay wss://knoot.dev/ws --token <token>   # a token, for a machine
 ```
 
-Registration is open, which changes what a valid token is worth, so the relay
-is built accordingly:
+**People and machines authenticate differently, on purpose.** A person signs in
+with email and password; that is a Supabase account, and it is what the console
+checks. A machine presents an agent token minted in the console: resolved
+against local SQLite with no network call, because the hot path has to keep
+working when everything else is down. The CLI is unchanged and existing tokens
+keep working.
 
-- **Tokens are stored as SHA-256 hashes.** A database dump hands over nothing
+- **Agent tokens are stored as SHA-256 hashes.** A database dump hands over nothing
   that works, and an existing token can never be shown to you again — only
   replaced. Mint one per machine, so revoking one costs you nothing else.
 - **A team cannot address another team's log.** Every repo key is namespaced by
@@ -145,8 +148,34 @@ is built accordingly:
 - **You cannot revoke your way out.** The last live token is refused, because
   there is no recovery path and nobody to ask.
 
-The pages are embedded in the binary, so your own relay serves them too — `/`
-the site, `/app` the console, `/ops` the original single-team operator view.
+The front end is a Vite app in `web/`, built to `web/dist` and embedded into
+the binary with `include_dir!`, so your own relay serves all of it with no
+second deployment and no CORS: `/` the site, `/docs`, `/status`, `/app` the
+console, `/ops` the original single-team operator view.
+
+```sh
+npm --prefix web ci
+npm --prefix web run build     # required before cargo build
+cargo build --release
+```
+
+`web/dist` is committed for exactly one reason: `cargo install --git` has no
+way to run npm, and a relay that cannot serve its own console is not one
+binary. CI rebuilds it on every push, so a stale `dist` cannot ship.
+
+Sign-in needs a Supabase project. Without one the relay still runs and agent
+tokens still work; the console simply says sign-in is not configured.
+
+```sh
+# the browser bundle, at build time
+VITE_SUPABASE_URL=… VITE_SUPABASE_ANON_KEY=… npm --prefix web run build
+# the relay, at run time — it verifies a signed-in person's access token
+SUPABASE_URL=… SUPABASE_ANON_KEY=… SUPABASE_SERVICE_ROLE_KEY=… knoot relay
+```
+
+Apply `supabase/migrations/0001_teams.sql` first. It creates `teams` and
+`team_members` behind row-level security, so a browser holding the anon key can
+read only its own team.
 
 
 ## How it works

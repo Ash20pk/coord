@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>knoot console</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wdth,wght@0,75..100,400..700;1,75..100,400..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/src/styles/tokens.css">
+<link rel="stylesheet" href="/src/styles/app.css">
+</head>
+<body class="app-body">
+
+<!-- Signed out -->
+<div class="auth" id="auth" hidden>
+  <div class="auth-panel">
+    <a class="brand" href="/">knoot</a>
+    <h1 id="auth-title">Sign in</h1>
+    <p class="auth-sub" id="auth-sub">Manage your team, agent tokens and live sessions.</p>
+
+    <form id="auth-form">
+      <label class="field">
+        <span>Work email</span>
+        <input id="auth-email" type="email" autocomplete="email" required placeholder="you@company.com">
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input id="auth-password" type="password" autocomplete="current-password" required minlength="8" placeholder="At least 8 characters">
+      </label>
+      <label class="field" id="team-field" hidden>
+        <span>Team name</span>
+        <input id="auth-team" maxlength="60" placeholder="Platform team">
+      </label>
+      <button class="btn auth-submit" type="submit" id="auth-go">Sign in</button>
+      <div class="err" id="auth-err" hidden></div>
+      <div class="ok" id="auth-ok" hidden></div>
+    </form>
+
+    <div class="auth-alt">
+      <button type="button" class="linkish" id="auth-switch">Create an account</button>
+      <button type="button" class="linkish" id="auth-reset">Forgot password</button>
+    </div>
+    <p class="auth-foot">Agents keep authenticating with tokens. This account is for people.</p>
+  </div>
+  <aside class="auth-aside">
+    <div class="term">
+      <div class="bar"><span class="cmd">knoot who</span><span class="real">what the console shows, live</span></div>
+<pre>priya   <span class="d">"Add refreshSession() to auth"</span>   51s ago
+        └─ <span class="g">src/tokens.js (lease 9m)</span>
+ash     <span class="d">"Refactor session handling"</span>     64s ago
+        └─ <span class="g">src/auth.js (lease 8m)</span>
+sam     <span class="d">-</span>                              51s ago
+        └─ blocked on <span class="o">src/auth.js</span></pre>
+    </div>
+  </aside>
+</div>
+
+<!-- Signed in -->
+<div class="shell" id="shell" hidden>
+  <header class="topbar">
+    <a class="brand" href="/">knoot</a>
+    <span class="team-name" id="team-name"></span>
+    <nav class="tabs" id="tabs">
+      <a href="#sessions">Sessions</a>
+      <a href="#repositories">Repositories</a>
+      <a href="#tokens">Agent tokens</a>
+      <a href="#team">Team</a>
+      <a href="#settings">Settings</a>
+    </nav>
+    <div class="topright">
+      <a href="/docs/">Docs</a>
+      <span class="who" id="who-email"></span>
+      <button class="linkish" id="signout">Sign out</button>
+    </div>
+  </header>
+
+  <main id="view"></main>
+</div>
+
+<div class="booting" id="booting">Loading your console</div>
+
+<script type="module" src="/src/app.ts"></script>
+</body>
+</html>

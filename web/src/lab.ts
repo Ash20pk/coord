@@ -1,93 +1,8 @@
-<!doctype html>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>knoot lab</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wdth,wght@75..100,400..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css">
-<style>
-  :root {
-    --bg: #12161a; --panel: #171c21; --panel-2: #1d232a; --rule: #2b3238; --rule-2: #222830;
-    --text: #e8ecef; --text-2: #aab2ba; --dim: #7d868f;
-    --held: #19a974; --blocked: #ff4a1f; --wire: #3b7bff; --warn: #f0b429;
-    --sans: 'Instrument Sans', system-ui, sans-serif;
-    --mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
-  }
-  * { box-sizing: border-box; }
-  html, body { height: 100%; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); display: flex; flex-direction: column; overflow: hidden; -webkit-font-smoothing: antialiased; }
-  header { display: flex; align-items: center; gap: 20px; flex: none; height: 48px; padding: 0 16px; border-bottom: 1px solid var(--rule); background: var(--panel); }
-  .brand { font-weight: 600; font-size: 16px; display: flex; align-items: center; gap: 9px; }
-  .brand span { color: var(--text-2); font-weight: 400; font-size: 13.5px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--blocked); transition: background .3s; }
-  .dot.on { background: var(--held); }
-  .repo { color: var(--dim); font-size: 12.5px; font-family: var(--mono); }
-  a.link { color: var(--text-2); font-size: 13px; }
-  a.link:hover { color: var(--text); }
-  .counts { margin-left: auto; display: flex; gap: 20px; font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; }
-  .counts b { font-weight: 500; color: var(--text); font-family: var(--mono); margin-right: 5px; }
-  .counts .hot b { color: var(--blocked); } .counts .warn b { color: var(--warn); }
+// xterm and its fit addon are loaded from a CDN as classic scripts, so they
+// arrive as globals rather than imports.
+declare const Terminal: any;
+declare const FitAddon: any;
 
-  main { flex: 1; display: grid; grid-template-columns: 1fr 400px; min-height: 0; }
-  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
-  #terms { display: grid; grid-template-rows: 1fr 1fr; min-height: 0; min-width: 0; }
-  #terms.quad { grid-template-columns: 1fr 1fr; }
-  .term { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
-  .term-bar { flex: none; display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--rule); }
-  .who { font-family: var(--mono); font-size: 13px; }
-  .tag { font-size: 12.5px; color: var(--dim); }
-  .holding { margin-left: auto; display: flex; gap: 12px; flex-wrap: wrap; justify-content: flex-end; font-family: var(--mono); font-size: 12px; }
-  .chip { color: var(--held); }
-  .chip.blocked { color: var(--blocked); font-family: var(--sans); font-size: 12.5px; }
-  .chip.idle { color: var(--dim); font-family: var(--sans); font-size: 12.5px; }
-  .screen { flex: 1; min-height: 0; padding: 6px 8px; background: var(--bg); }
-  .screen .xterm { height: 100%; }
-
-  aside { display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
-  aside h2 { margin: 0; height: 34px; padding: 0 14px; font-size: 14px; font-weight: 500; border-bottom: 1px solid var(--rule); display: flex; align-items: center; gap: 10px; }
-  aside h2 .tag.live { color: var(--held); }
-  #feed { flex: 1; overflow-y: auto; min-height: 0; font-family: var(--mono); font-size: 12px; }
-  .ev { display: grid; grid-template-columns: 62px 58px 96px 1fr; gap: 10px; padding: 5px 14px; border-bottom: 1px solid var(--rule-2); color: var(--text-2); align-items: baseline; font-variant-numeric: tabular-nums; }
-  .ev time { color: var(--dim); }
-  .ev .u { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .ev .k { font-weight: 500; }
-  .ev .d { overflow-wrap: anywhere; }
-  .ev.new { animation: rowin .5s ease-out; }
-  @keyframes rowin { from { background: var(--panel-2); } to { background: transparent; } }
-  .k.claim { color: var(--held); } .k.blocked { color: var(--blocked); } .k.ungated, .k.merge { color: var(--warn); }
-  .k.joined, .k.freed { color: var(--wire); } .k.wrote, .k.intent, .k.left, .k.released { color: var(--text-2); }
-  .ev.blocked { background: rgba(255,74,31,.06); }
-  .ev.ungated { background: rgba(240,180,41,.06); }
-  .empty { padding: 22px 14px; color: var(--text-2); font-family: var(--sans); font-size: 13.5px; }
-  .hint { flex: none; padding: 8px 14px; border-top: 1px solid var(--rule); color: var(--dim); font-size: 12.5px; }
-  @media (prefers-reduced-motion: reduce) { .ev.new { animation: none; } }
-</style>
-
-<header>
-  <div class="brand"><span class="dot" id="dot"></span>knoot <span>lab</span></div>
-  <span class="repo" id="repo"></span>
-  <a class="link" href="/ops">Operator view</a>
-  <div class="counts">
-    <span><b id="s-claims">0</b>claims</span>
-    <span><b id="s-writes">0</b>writes</span>
-    <span id="w-blocked"><b id="s-blocked">0</b>blocked</span>
-    <span id="w-ungated"><b id="s-ungated">0</b>ungated</span>
-  </div>
-</header>
-
-<main>
-  <div id="terms"></div>
-  <aside>
-    <h2>Ledger <span id="live-tag" class="tag"></span></h2>
-    <div id="feed"><div class="empty">Waiting for activity.</div></div>
-    <div class="hint">Click a terminal to type. Give both agents the same file to see a block.</div>
-  </aside>
-</main>
-
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm-addon-fit/0.8.0/xterm-addon-fit.min.js"></script>
-<script>
 // A hosted relay requires a token. A browser cannot set headers on these,
 // so it travels as ?token= — taken from this page's own URL, and remembered
 // so a reload does not need it again.
@@ -188,7 +103,7 @@ function connect(){
   const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
   const ws = new WebSocket(withTok(proto + location.host + '/ws'));
   ws.onopen = () => {
-    $('dot').classList.add('on'); $('live-tag').textContent = 'live'; $('live-tag').className = 'tag live';
+    $('dot').classList.add('on'); $('dot').textContent = 'live'; $('live-tag').textContent = 'live'; $('live-tag').className = 'tag live';
     ws.send(JSON.stringify({type:'hello', repo, daemon:'lab-web'}));
   };
   ws.onmessage = m => {
@@ -202,7 +117,7 @@ function connect(){
     render();
   };
   ws.onclose = () => {
-    $('dot').classList.remove('on'); $('live-tag').textContent = 'reconnecting'; $('live-tag').className = 'tag';
+    $('dot').classList.remove('on'); $('dot').textContent = 'reconnecting'; $('live-tag').textContent = 'reconnecting'; $('live-tag').className = 'tag';
     setTimeout(connect, 2000);
   };
 }
@@ -287,4 +202,3 @@ function render(){
 
 setInterval(render, 1000);
 boot();
-</script>

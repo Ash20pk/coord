@@ -32,6 +32,23 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The web front end is embedded into the binary, so it has to exist
+      # before rustc runs. Building it here also means a broken front end
+      # fails the release rather than shipping a stale one.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the web front end
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          npm --prefix web ci
+          npm --prefix web run build
+
       - name: Test
         run: cargo test --locked
 

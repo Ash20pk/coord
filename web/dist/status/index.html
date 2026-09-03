@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>knoot status</title>
+<meta name="description" content="Live status of the knoot relay: websocket, event log, team API and registration.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wdth,wght@0,75..100,400..700;1,75..100,400..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script type="module" crossorigin src="/assets/status-CuRFDhpE.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/modulepreload-polyfill-P2Xu9kJm.js">
+  <link rel="modulepreload" crossorigin href="/assets/relay-c9r9f4_p.js">
+  <link rel="stylesheet" crossorigin href="/assets/relay-FXwTmpsr.css">
+  <link rel="stylesheet" crossorigin href="/assets/status-waxtNjHT.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="/">knoot</a>
+    <nav>
+      <a href="/#problem">Why</a>
+      <a href="/#how">How it works</a>
+      <a href="/docs/">Docs</a>
+      <a href="/status/" aria-current="page">Status</a>
+    </nav>
+    <div class="right">
+      <a href="/app/">Sign in</a>
+      <a class="btn sm" href="/app/#signup">Start free</a>
+    </div>
+  </div>
+</header>
+
+<main class="status wrap">
+  <div class="banner" id="banner">
+    <span class="dot" id="banner-dot"></span>
+    <h1 id="banner-text">Checking the relay</h1>
+    <span class="checked" id="checked"></span>
+  </div>
+
+  <p class="intro">
+    These checks run in your browser, against the relay that served this page.
+    They are the same surfaces your agents use, so a failure here is a failure
+    they would see.
+  </p>
+
+  <section class="checks" id="checks"></section>
+
+  <section class="note">
+    <h2>What an outage means for your agents</h2>
+    <p>
+      knoot fails open. If the relay is unreachable, agents are not blocked:
+      every hook resolves to allow and sessions carry on uncoordinated, exactly
+      as they would without knoot installed. You lose collision prevention for
+      the duration, not the ability to work.
+    </p>
+    <p>
+      Because of that, silence from an agent proves nothing. Run
+      <code>knoot status</code> on a machine to see whether coordination is
+      actually on.
+    </p>
+  </section>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <a class="brand" href="/">knoot</a>
+    <a href="/docs/">Docs</a>
+    <a href="/status/">Status</a>
+    <a href="/app/">Console</a>
+    <a href="https://github.com/Ash20pk/knoot">GitHub</a>
+    <span class="relay" id="relay-line"></span>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>knoot operator view</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wdth,wght@75..100,400..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/src/styles/ops.css">
+</head>
+<body>
+<header>
+  <div class="brand">knoot <span>operator view</span></div>
+  <select id="repo" aria-label="Repository"></select>
+  <div class="counts">
+    <span class="conn" id="dot">connecting</span>
+    <span><b id="s-sessions">0</b>sessions</span>
+    <span><b id="s-claims">0</b>claims</span>
+    <span><b id="s-writes">0</b>writes</span>
+    <span id="w-blocked"><b id="s-blocked">0</b>blocked</span>
+    <span id="w-ungated"><b id="s-ungated">0</b>ungated</span>
+  </div>
+</header>
+
+<main>
+  <section>
+    <h2>Active sessions</h2>
+    <div id="sessions"><div class="empty">No active sessions.</div></div>
+  </section>
+  <section>
+    <h2>Ledger <span class="tag" id="live-tag">connecting</span></h2>
+    <div id="feed"><div class="empty">Waiting for activity.</div></div>
+  </section>
+</main>
+<footer id="foot">connecting</footer>
+<script type="module" src="/src/ops.ts"></script>
+</body>
+</html>

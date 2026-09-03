@@ -127,6 +127,17 @@ pub fn mint_token(conn: &rusqlite::Connection, team_id: &str, label: &str) -> Re
     Ok(IssuedToken { id, secret })
 }
 
+/// Record a team that was authenticated elsewhere, so local rows can point at
+/// it. Identity lives in Supabase; this is the relay's own copy of the name,
+/// which `resolve` joins against when listing a team's tokens.
+pub fn ensure_team(conn: &rusqlite::Connection, team_id: &str, name: &str) {
+    let _ = conn.execute(
+        "INSERT INTO teams (id, name, created_ts) VALUES (?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+        rusqlite::params![team_id, name, crate::proto::now_ms()],
+    );
+}
+
 /// Resolve a presented token to a team, or `None`.
 ///
 /// The lookup is by hash, so the comparison is a fixed-size index probe rather

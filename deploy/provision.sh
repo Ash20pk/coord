@@ -141,6 +141,15 @@ install -d -o knoot -g knoot -m 0750 /var/lib/knoot/snapshots
 
 say "token"
 install -d -m 0755 /etc/knoot
+# Console sign-in is optional. Say so plainly when it is off, the same way
+# Litestream does, so "sign-in is not configured" is never a mystery.
+if [[ -s /etc/knoot/supabase.env ]]; then
+	chmod 0600 /etc/knoot/supabase.env
+	say "console sign-in configured (/etc/knoot/supabase.env)"
+else
+	say "console sign-in OFF — no /etc/knoot/supabase.env; agent tokens still work"
+fi
+
 if ! [[ -s /etc/knoot/relay.env ]]; then
 	printf 'KNOOT_RELAY_TOKEN=%s\n' "$(openssl rand -hex 24)" > /etc/knoot/relay.env
 	chmod 0600 /etc/knoot/relay.env

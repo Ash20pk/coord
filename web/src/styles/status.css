@@ -1,0 +1,34 @@
+.status { padding: 48px 0 90px; }
+.banner { display: flex; align-items: center; gap: 14px; padding-bottom: 22px; border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
+.banner h1 { font-variation-settings: 'wdth' 86; font-size: clamp(28px, 3.6vw, 40px); line-height: 1.1; }
+.banner .dot { width: 13px; height: 13px; border-radius: 50%; background: var(--ink-3); flex: none; }
+.banner .dot.up { background: var(--held); }
+.banner .dot.down { background: var(--blocked); }
+.banner .dot.part { background: var(--warn); }
+.banner .checked { margin-left: auto; font-family: var(--mono); font-size: 13px; color: var(--ink-2); }
+.intro { margin-top: 20px; color: var(--ink-2); max-width: 68ch; }
+
+.checks { margin-top: 34px; }
+.check { display: grid; grid-template-columns: 20px 1fr auto auto; gap: 16px; align-items: baseline;
+  padding: 16px 0; border-top: 1px solid var(--rule); }
+.check:first-child { border-top: 1px solid var(--ink); }
+.check .mark { width: 10px; height: 10px; border-radius: 50%; background: var(--ink-3); align-self: center; }
+.check .mark.up { background: var(--held); }
+.check .mark.down { background: var(--blocked); }
+.check .mark.part { background: var(--warn); }
+.check h3 { font-size: 17px; font-weight: 500; }
+.check p { margin-top: 5px; color: var(--ink-2); font-size: 14.5px; }
+.check .verdict { font-size: 14.5px; }
+.check .verdict.up { color: var(--held); }
+.check .verdict.down { color: var(--blocked); }
+.check .verdict.part { color: #a8791a; }
+.check .ms { font-family: var(--mono); font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; min-width: 62px; text-align: right; }
+
+.note { margin-top: 64px; padding-top: 28px; border-top: 1px solid var(--rule); max-width: 68ch; }
+.note h2 { font-variation-settings: 'wdth' 88; font-size: 24px; }
+.note p { margin-top: 14px; color: var(--ink-2); }
+.note code { color: var(--ink); background: var(--paper-2); padding: 1px 5px; border-radius: 3px; }
+@media (max-width: 700px) {
+  .check { grid-template-columns: 20px 1fr; }
+  .check .verdict, .check .ms { grid-column: 2; text-align: left; }
+}

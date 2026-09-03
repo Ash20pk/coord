@@ -10,6 +10,10 @@ User=knoot
 Group=knoot
 # KNOOT_RELAY_TOKEN lives here, 0600, never in the repo.
 EnvironmentFile=/etc/knoot/relay.env
+# Console sign-in: SUPABASE_URL, SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY.
+# Optional — without it the relay runs exactly as before and agent tokens are
+# the only credential, so the file is not required to exist.
+EnvironmentFile=-/etc/knoot/supabase.env
 ExecStart=/usr/local/bin/knoot relay --listen 127.0.0.1:7420 --db /var/lib/knoot/relay.db
 Restart=always
 RestartSec=2
