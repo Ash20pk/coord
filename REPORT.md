@@ -257,6 +257,14 @@ detection case and was reverted; the honest limitation is documented instead.
     and nothing caught it. Found by reading the deployed relay's log instead of
     the green checks above it: seq 3 and seq 4 were the same claim.
 
+16. **`knoot status` reported a relay as "unreachable" while it was merely
+    connecting.** `knoot daemon && knoot status` — the sequence the README
+    prints — reliably showed `[FAIL] relay … unreachable` for the few seconds a
+    TLS handshake to a hosted relay takes, then went green. Found by believing
+    it and spending an hour chasing a server-side phantom. It already had what
+    it needed to tell the difference: no connection *and* no recorded error
+    means the first dial is still in flight, which now reads `connecting…`.
+
 Bug 11 is the pattern behind most of this list: a check that reports on the
 thing it can see rather than the thing you asked about. `knoot status` exists
 because fail-open makes "off" invisible, and it was itself guessing.

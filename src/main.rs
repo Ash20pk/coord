@@ -436,6 +436,15 @@ fn status() -> Result<()> {
                 println!("[WARN] relay     {} connected, no snapshot yet ({token_note})", c.relay);
                 problems.push("relay is connected but has sent no snapshot — check the relay's log".into());
             }
+            // Not connected and nothing has failed yet: the first dial is
+            // still in flight. Saying "unreachable" here is wrong and alarming
+            // — a TLS handshake to a hosted relay takes a moment, so `knoot
+            // daemon && knoot status` would report a broken relay that is
+            // merely young. It cost an hour of chasing a phantom to notice.
+            Some((false, _, None)) => {
+                println!("[..  ] relay     {} connecting… ({token_note})", c.relay);
+                println!("                 run `knoot status` again in a moment");
+            }
             Some((false, _, err)) => {
                 println!("[FAIL] relay     {} unreachable ({token_note})", c.relay);
                 if let Some(e) = &err {
