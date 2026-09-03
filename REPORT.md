@@ -208,10 +208,30 @@ This is the most useful thing to know about the project.
    empty and it answered from nothing.
 8. **The shim's timeout equalled the daemon's worst case**, so under a hung
    relay it timed out blind instead of receiving the explicit fail-open verdict.
+9. **`wss://` panicked on the first handshake, and `coord status` said `[ok]`.**
+   Found by deploying a relay to a real domain. rustls 0.23 will not pick a
+   crypto provider unless the build names one, and its refusal is a panic — in
+   the daemon's relay task, which then died. Failing open did the rest: every
+   edit allowed, `coord who` answering out of the purely local mirror, and the
+   hosted relay's event log empty at zero rows. Every hosted deployment before
+   this was decorative.
+10. **`coord watch` dialled the relay with no token,** so the one surface a
+    human checks to confirm coordination is on would have shown a red dot
+    against exactly the relays that need one.
+11. **`coord status` inferred the relay from the daemon.** It printed `[ok]`
+    whenever the daemon answered a local request and a token was on disk,
+    neither of which is evidence of a connection — which is what let 9 and 10
+    hide. It now asks the daemon (`DReq::Health`) for the socket state, whether
+    a snapshot has landed, and the last dial error, and distinguishes a 401
+    from unreachable.
 
 Two of these (2 and 6) were caused by fixes to earlier ones. One intermediate
 fix — treating a peer's claim as evidence of authorship — suppressed the genuine
 detection case and was reverted; the honest limitation is documented instead.
+
+Bug 11 is the pattern behind most of this list: a check that reports on the
+thing it can see rather than the thing you asked about. `coord status` exists
+because fail-open makes "off" invisible, and it was itself guessing.
 
 The suite is now honest about its own limits: a test named
 `daemon_survives_relay_restart` never restarted anything and was renamed, four
