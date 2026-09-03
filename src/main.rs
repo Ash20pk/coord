@@ -399,16 +399,51 @@ fn status() -> Result<()> {
         problems.push("start the daemon: coord daemon".into());
     }
 
-    // 5. the relay, and the token, which fail differently and must read differently
+    // 5. the relay: asked, not inferred. A stored token says nothing about
+    //    whether the dial succeeded — and a daemon whose relay task died still
+    //    answers every local request, so "daemon responding" is not evidence.
     if let Some(c) = &cfg {
         let origin = config::relay_origin(&c.relay);
         let have_token = config::token_for(&c.relay).is_some();
-        println!(
-            "[{}] relay     {} (token: {})",
-            if daemon { "ok  " } else { "?   " },
-            c.relay,
-            if have_token { "present" } else { "none — fine for an open relay, required for a hosted one" }
-        );
+        let token_note =
+            if have_token { "token: present" } else { "token: none — fine for an open relay" };
+        let health = root.as_ref().and_then(|r| {
+            match hook::call_daemon(&DReq::Health { repo_root: r.to_string_lossy().to_string() }) {
+                Some(DResp::Health { connected, ready, last_error }) => {
+                    Some((connected, ready, last_error))
+                }
+                _ => None,
+            }
+        });
+        match health {
+            Some((true, true, _)) => {
+                println!("[ok  ] relay     {} ({token_note})", c.relay);
+            }
+            Some((true, false, _)) => {
+                println!("[WARN] relay     {} connected, no snapshot yet ({token_note})", c.relay);
+                problems.push("relay is connected but has sent no snapshot — check the relay's log".into());
+            }
+            Some((false, _, err)) => {
+                println!("[FAIL] relay     {} unreachable ({token_note})", c.relay);
+                if let Some(e) = &err {
+                    println!("                 last error: {}", truncate_err(e));
+                    if e.contains("401") {
+                        problems.push(format!(
+                            "the relay rejected this token: coord login --relay {} --token <token>",
+                            c.relay
+                        ));
+                    } else {
+                        problems.push(format!("cannot reach {}: check it is running and reachable", c.relay));
+                    }
+                } else {
+                    problems.push(format!("cannot reach {}", c.relay));
+                }
+            }
+            // No daemon to ask. Its own line already said so.
+            None => {
+                println!("[?   ] relay     {} — no daemon to ask ({token_note})", c.relay);
+            }
+        }
         if !have_token && !origin.contains("127.0.0.1") && !origin.contains("localhost") {
             problems.push(format!("if that relay requires auth: coord login --relay {} --token <token>", c.relay));
         }
@@ -425,6 +460,17 @@ fn status() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A dial error is a nest of wrapped causes; the first line is the part a
+/// human acts on.
+fn truncate_err(e: &str) -> String {
+    let first = e.lines().next().unwrap_or(e);
+    if first.chars().count() > 120 {
+        format!("{}…", first.chars().take(120).collect::<String>())
+    } else {
+        first.to_string()
+    }
 }
 
 fn who() -> Result<()> {

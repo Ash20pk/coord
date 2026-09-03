@@ -423,6 +423,10 @@ pub enum DReq {
     /// A Bash command that finished: diff the working tree if it was audited.
     BashPost { repo_root: String, session: String },
     Who { repo_root: String },
+    /// Is this daemon actually talking to the relay? `coord status` cannot
+    /// answer that by inspecting config: a stored token proves nothing about
+    /// whether the dial succeeded.
+    Health { repo_root: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -443,6 +447,15 @@ pub enum DResp {
     },
     Ok,
     Err { msg: String },
+    /// `connected` is the socket; `ready` means a Welcome snapshot has landed,
+    /// so the mirror can be trusted. `last_error` is the most recent dial
+    /// failure, which is what turns "off" into something a human can fix.
+    Health {
+        connected: bool,
+        ready: bool,
+        #[serde(default)]
+        last_error: Option<String>,
+    },
 }
 
 #[cfg(test)]

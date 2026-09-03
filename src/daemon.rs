@@ -31,6 +31,9 @@ struct RepoConn {
     stop_holds: Arc<Mutex<HashMap<String, u32>>>,
     view: Arc<Mutex<View>>,
     connected: Arc<Mutex<bool>>,
+    /// Why the last dial failed, kept so `coord status` can say which kind of
+    /// off this is rather than only that it is off.
+    last_error: Arc<Mutex<Option<String>>>,
     /// True once a Welcome snapshot has been applied, i.e. the mirror is
     /// trustworthy. Until then we must not answer from an empty view.
     ready: Arc<Mutex<bool>>,
@@ -433,6 +436,15 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             }
             DResp::Mail { items: drain_mail(&rc, &user) }
         }
+        DReq::Health { repo_root } => {
+            let Some(rc) = ensure_repo(d, &repo_root).await else {
+                return DResp::Err { msg: "repo not coord-enabled (run `coord init`)".into() };
+            };
+            let connected = *rc.connected.lock().unwrap();
+            let ready = *rc.ready.lock().unwrap();
+            let last_error = rc.last_error.lock().unwrap().clone();
+            DResp::Health { connected, ready, last_error }
+        }
         DReq::Who { repo_root } => {
             let Some(rc) = ensure_repo(d, &repo_root).await else {
                 return DResp::Err { msg: "repo not coord-enabled (run `coord init`)".into() };
@@ -776,6 +788,7 @@ async fn ensure_repo(d: &Arc<Daemon>, repo_root: &str) -> Option<Arc<RepoConn>> 
         mail: Arc::new(Mutex::new(HashMap::new())),
         stop_holds: Arc::new(Mutex::new(HashMap::new())),
         connected: Arc::new(Mutex::new(false)),
+        last_error: Arc::new(Mutex::new(None)),
         ready: Arc::new(Mutex::new(false)),
         pending: Arc::new(Mutex::new(HashMap::new())),
     });
@@ -797,13 +810,14 @@ async fn ensure_repo(d: &Arc<Daemon>, repo_root: &str) -> Option<Arc<RepoConn>> 
 /// Dial the relay, presenting this user's token when one is known. A relay
 /// with no token configured ignores the header, so the same client works
 /// against a loopback relay and a hosted one.
-async fn connect_authed(
+pub(crate) async fn connect_authed(
     url: &str,
 ) -> Result<(
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tokio_tungstenite::tungstenite::handshake::client::Response,
 )> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    crate::install_tls_provider();
     let mut req = url.into_client_request()?;
     if let Some(tok) = crate::config::token_for(url) {
         req.headers_mut().insert(
@@ -822,6 +836,7 @@ async fn relay_loop(cfg: RepoConfig, rc: Arc<RepoConn>, mut rx: mpsc::UnboundedR
             Ok((ws, _)) => {
                 announced_auth_failure = false;
                 *rc.connected.lock().unwrap() = true;
+                *rc.last_error.lock().unwrap() = None;
                 let (mut w, mut r) = ws.split();
                 let hello = ClientMsg::Hello { repo: cfg.repo.clone(), daemon: whoami() };
                 if w.send(WsMsg::Text(serde_json::to_string(&hello).unwrap())).await.is_err() {
@@ -867,6 +882,7 @@ async fn relay_loop(cfg: RepoConfig, rc: Arc<RepoConn>, mut rx: mpsc::UnboundedR
                 // fail open — but they are not the same thing to the human, so
                 // say which, once, rather than every three seconds.
                 let msg = e.to_string();
+                *rc.last_error.lock().unwrap() = Some(msg.clone());
                 if !announced_auth_failure && msg.contains("401") {
                     eprintln!(
                         "coord: relay {} rejected this daemon's token. Coordination is OFF \

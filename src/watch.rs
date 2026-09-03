@@ -58,7 +58,9 @@ pub async fn run(repo_root: std::path::PathBuf) -> Result<()> {
 
 async fn stream(cfg: RepoConfig, st: Arc<Mutex<State>>) {
     loop {
-        if let Ok((mut ws, _)) = tokio_tungstenite::connect_async(&cfg.relay).await {
+        // The same dial the daemon uses: a hosted relay rejects an untokened
+        // watcher, and the dashboard would show a permanently red dot.
+        if let Ok((mut ws, _)) = crate::daemon::connect_authed(&cfg.relay).await {
             let hello = ClientMsg::Hello { repo: cfg.repo.clone(), daemon: "watch".into() };
             if ws.send(WsMsg::Text(serde_json::to_string(&hello).unwrap())).await.is_ok() {
                 st.lock().unwrap().connected = true;

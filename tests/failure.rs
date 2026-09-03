@@ -179,3 +179,37 @@ async fn an_unauthenticated_client_is_refused_by_the_relay() {
         "a wrong token must be refused, not merely logged"
     );
 }
+
+/// A `wss://` relay is the whole point of hosting one, and it used to panic
+/// inside the daemon's relay task on the first handshake: rustls 0.23 will not
+/// pick a crypto provider for you, and the refusal is a panic rather than an
+/// error. Because coord fails open, the visible result was a repo that looked
+/// coordinated and was not — the relay's event log stayed empty while
+/// `coord status` printed `[ok] relay`. Found by deploying one.
+#[tokio::test]
+async fn a_wss_relay_does_not_panic_the_dialer() {
+    coord::install_tls_provider();
+    assert!(
+        rustls::crypto::CryptoProvider::get_default().is_some(),
+        "no default crypto provider: the next wss:// handshake panics"
+    );
+
+    // A plain TCP listener speaking no TLS. The dial must come back as an
+    // error — the point is that it comes back at all.
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        if let Ok((s, _)) = l.accept().await {
+            drop(s);
+        }
+    });
+    let dial = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio_tungstenite::connect_async(format!("wss://127.0.0.1:{port}/ws")),
+    )
+    .await;
+    match dial {
+        Ok(r) => assert!(r.is_err(), "a non-TLS listener cannot complete a wss handshake"),
+        Err(_) => panic!("wss dial hung instead of failing"),
+    }
+}
