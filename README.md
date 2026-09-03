@@ -285,7 +285,7 @@ dashboard/audit surface over the event log.
 ## Tests
 
 ```sh
-cargo test          # 140 tests, ~4s
+cargo test          # 146 tests, ~4s
 ```
 
 Four layers:

@@ -1139,3 +1139,71 @@ async fn a_granted_claim_is_logged_exactly_once() {
         .unwrap();
     assert_eq!(n, 1, "one claim, one log entry — got {n}");
 }
+
+/// The denial text a session is handed when it tries to edit `path`.
+fn brief_for(sock: &Path, root: &PathBuf, session: &str, path: &str) -> Option<String> {
+    let out = hook(sock, edit(root, session, path, "PreToolUse"))?;
+    out["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The conflict brief must report what the holder is doing *now*.
+///
+/// A claim records the intent its holder had when it took the file, and a
+/// lease is ten minutes renewed on activity — so the claim routinely outlives
+/// the turn that made it. Two consequences, both of which shipped: a session
+/// that claimed a file before its first prompt was reported as
+/// `intent: unknown` while `knoot who` showed exactly what it was doing, and a
+/// session that had moved on had its previous intent quoted back with full
+/// confidence. The brief's whole value is telling a blocked agent what the
+/// holder is up to, so a confidently wrong answer is worse than no answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_brief_reports_the_holders_current_intent() {
+    let (sock, root) = scenario("live-intent").await;
+
+    // The holder claims first and declares its intent afterwards, which is
+    // what happens whenever a tool call precedes the turn's prompt.
+    hook(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "holder",
+        "cwd": root.to_string_lossy()
+    }));
+    hook(&sock, edit(&root, "holder", "src/db.ts", "PreToolUse"));
+    hook(&sock, json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": "holder",
+        "cwd": root.to_string_lossy(), "prompt": "add connection pooling"
+    }));
+
+    hook(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "peer",
+        "cwd": root.to_string_lossy()
+    }));
+    let brief = brief_for(&sock, &root, "peer", "src/db.ts").expect("the peer must be blocked");
+    assert!(
+        brief.contains("add connection pooling"),
+        "an intent declared after the claim must still be reported: {brief}"
+    );
+    assert!(!brief.contains("unknown"), "and must not read as unknown: {brief}");
+
+    // The holder moves on while still holding the file. The brief must follow.
+    hook(&sock, json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": "holder",
+        "cwd": root.to_string_lossy(), "prompt": "actually, add read replicas"
+    }));
+    let brief = brief_for(&sock, &root, "peer", "src/db.ts").expect("still blocked");
+    assert!(brief.contains("read replicas"), "a stale intent must not be quoted: {brief}");
+    assert!(
+        !brief.contains("connection pooling"),
+        "the superseded intent must be gone: {brief}"
+    );
+
+    // And a claim taken with no prompt at all is genuinely unknown; saying so
+    // is right, and inventing something would be worse.
+    hook(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "quiet",
+        "cwd": root.to_string_lossy()
+    }));
+    hook(&sock, edit(&root, "quiet", "src/ci.yml", "PreToolUse"));
+    let brief = brief_for(&sock, &root, "peer", "src/ci.yml").expect("blocked");
+    assert!(brief.contains("intent: unknown"), "no prompt means unknown: {brief}");
+}

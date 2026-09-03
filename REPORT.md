@@ -265,6 +265,19 @@ detection case and was reverted; the honest limitation is documented instead.
     it needed to tell the difference: no connection *and* no recorded error
     means the first dial is still in flight, which now reads `connecting…`.
 
+17. **The conflict brief reported the wrong intent, in two directions.** A
+    claim stores the intent its holder had when it took the file, and the brief
+    read that. But a lease is ten minutes, renewed on activity, so it outlives
+    the turn that made it: a session that claimed a file before its first
+    prompt was reported as `intent: unknown` while `knoot who` showed exactly
+    what it was doing, and a session that had moved on had its previous intent
+    quoted back with full confidence. The brief's entire value is telling a
+    blocked agent what the holder is up to — the landing page makes that the
+    headline claim — so a confidently stale answer is worse than none. The
+    holder's live session record is now preferred, at all three places a brief
+    is built, with the claim's copy as the fallback and `unknown` reserved for
+    a claim taken before any prompt at all.
+
 Bug 11 is the pattern behind most of this list: a check that reports on the
 thing it can see rather than the thing you asked about. `knoot status` exists
 because fail-open makes "off" invisible, and it was itself guessing.

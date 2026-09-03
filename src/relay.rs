@@ -868,10 +868,14 @@ async fn client(sock: WebSocket, app: Arc<App>, id: crate::teams::Identity) -> R
                     let mut repos = app.repos.lock().unwrap();
                     let st = repos.get_mut(&repo).unwrap();
                     st.view.prune();
-                    st.view.conflicting_on(&session, &path, &branch).cloned()
+                    // Resolved under the same lock as the lookup, so the pair
+                    // cannot disagree about who holds what.
+                    st.view
+                        .conflicting_on(&session, &path, &branch)
+                        .map(|c| (c.clone(), st.view.holder_intent(c)))
                 };
                 match verdict {
-                    Some(holder) => {
+                    Some((holder, live_intent)) => {
                         // Record the collision before answering — this is the
                         // number the whole product exists to reduce.
                         app.commit(
@@ -890,7 +894,11 @@ async fn client(sock: WebSocket, app: Arc<App>, id: crate::teams::Identity) -> R
                             granted: false,
                             holder: Some(holder.session),
                             holder_user: Some(holder.user),
-                            holder_intent: Some(holder.intent),
+                            // The holder's current intent, not the one frozen
+                            // into the claim: the relay sees every session, so
+                            // it is the best-placed to answer this, and a
+                            // daemon on another machine has nothing else.
+                            holder_intent: Some(live_intent),
                             lease_until: Some(holder.lease_until),
                         });
                     }

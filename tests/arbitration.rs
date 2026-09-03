@@ -210,3 +210,81 @@ async fn claim_grant_is_broadcast_to_peers() {
         }
     }
 }
+
+/// The relay must answer a denial with the holder's *current* intent.
+///
+/// The daemon-side fix for this can only consult session records it happens to
+/// have. A peer on another machine has none of the holder's, so the relay's
+/// answer is the only source — it sees every session, which makes it the one
+/// place that can always answer. This drives the relay directly, as a second
+/// machine would.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_relay_denies_with_the_holders_current_intent() {
+    let url = start_relay().await;
+    let repo = "arb-live-intent";
+
+    let mut holder = Client::connect(&url, repo).await;
+    holder
+        .send(&ClientMsg::Append {
+            event: Event::SessionStarted {
+                session: "h1".into(),
+                user: "ash".into(),
+                branch: "main".into(),
+                ts: now_ms(),
+            },
+        })
+        .await;
+    // Claims the file before saying anything about what it is doing.
+    let hid = uuid::Uuid::new_v4().to_string();
+    holder
+        .send(&ClientMsg::ClaimReq {
+            id: hid.clone(),
+            session: "h1".into(),
+            user: "ash".into(),
+            path: "src/db.ts".into(),
+            intent: String::new(),
+            branch: "main".into(),
+        })
+        .await;
+    match holder.claim_resp(&hid).await {
+        ServerMsg::ClaimResp { granted, .. } => assert!(granted, "holder must get the file"),
+        other => panic!("expected a ClaimResp, got {other:?}"),
+    }
+    holder
+        .send(&ClientMsg::Append {
+            event: Event::IntentDeclared {
+                session: "h1".into(),
+                text: "add connection pooling".into(),
+                ts: now_ms(),
+                branch: "main".into(),
+            },
+        })
+        .await;
+
+    // A peer that has never heard of h1 asks for the same path.
+    let mut peer = Client::connect(&url, repo).await;
+    let id = uuid::Uuid::new_v4().to_string();
+    peer.send(&ClientMsg::ClaimReq {
+        id: id.clone(),
+        session: "p1".into(),
+        user: "priya".into(),
+        path: "src/db.ts".into(),
+        intent: "add refreshSession".into(),
+        branch: "main".into(),
+    })
+    .await;
+
+    match peer.claim_resp(&id).await {
+        ServerMsg::ClaimResp { granted, holder_intent, holder_user, .. } => {
+            assert!(!granted, "the path is held; this must be a denial");
+            assert_eq!(holder_user.as_deref(), Some("ash"));
+            assert_eq!(
+                holder_intent.as_deref(),
+                Some("add connection pooling"),
+                "the relay must report what the holder is doing now, not the \
+                 empty intent frozen into the claim"
+            );
+        }
+        other => panic!("expected a ClaimResp, got {other:?}"),
+    }
+}

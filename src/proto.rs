@@ -268,6 +268,36 @@ impl View {
         self.conflicting_on(session, path, "")
     }
 
+    /// What the holder of a claim is *currently* doing.
+    ///
+    /// A claim records the intent its holder had at the moment it acquired the
+    /// file, and then keeps it — but a lease is ten minutes, renewed on
+    /// activity, so it routinely outlives the turn that took it. Two things
+    /// follow, and both were visible in briefs: a session that claimed a file
+    /// before its first prompt reported `intent: unknown` while `knoot who`
+    /// showed exactly what it was doing, and a session that moved on to
+    /// something else had its old intent quoted back with full confidence.
+    ///
+    /// The live session record is therefore the better answer where we have
+    /// one. The claim's own copy is the fallback, for a holder whose session
+    /// we have not seen — and an empty string means genuinely unknown, which
+    /// is a claim taken before any prompt at all.
+    pub fn holder_intent(&self, claim: &Claim) -> String {
+        self.sessions
+            .get(&claim.session)
+            .map(|s| s.intent.clone())
+            .filter(|i| !i.trim().is_empty())
+            .unwrap_or_else(|| claim.intent.clone())
+    }
+
+    /// A copy of `claim` whose intent is the holder's current one. Convenient
+    /// where a `Claim` is about to be handed to something that formats it.
+    pub fn claim_with_live_intent(&self, claim: &Claim) -> Claim {
+        let mut c = claim.clone();
+        c.intent = self.holder_intent(claim);
+        c
+    }
+
     /// As `conflicting`, for a writer known to be on `branch`.
     pub fn conflicting_on(&self, session: &str, path: &str, branch: &str) -> Option<&Claim> {
         let now = now_ms();

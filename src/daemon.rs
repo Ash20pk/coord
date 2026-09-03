@@ -120,7 +120,9 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                     Some(s) => (s.user.clone(), s.branch.clone()),
                     None => (whoami(), String::new()),
                 };
-                v.conflicting_on(&session, &path, &branch).cloned().map(|c| (c, user))
+                v.conflicting_on(&session, &path, &branch)
+                    .map(|c| v.claim_with_live_intent(c))
+                    .map(|c| (c, user))
             };
             if let Some((c, user)) = local {
                 let _ = rc.tx.send(ClientMsg::Append {
@@ -172,6 +174,10 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                         intent: holder_intent.unwrap_or_default(),
                         branch: String::new(),
                     };
+                    // The relay answers with the intent recorded on the claim,
+                    // which may predate whatever the holder is doing now. We
+                    // have their session record, so prefer it.
+                    let c = rc.view.lock().unwrap().claim_with_live_intent(&c);
                     deny(&path, &c)
                 }
                 Ok(Ok(ServerMsg::ClaimResp { granted: true, .. })) => {
@@ -302,7 +308,7 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                 let hit = {
                     let branch = branch_of(&rc, &session);
                     let v = rc.view.lock().unwrap();
-                    v.conflicting_on(&session, &path, &branch).cloned()
+                    v.conflicting_on(&session, &path, &branch).map(|c| v.claim_with_live_intent(c))
                 };
                 if let Some(c) = hit {
                     report_denied(&rc, &session, &path, &c);
