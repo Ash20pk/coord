@@ -65,6 +65,30 @@ stderr, and every edit is allowed. An operator's auth mistake cannot become an
 outage for the team.
 
 
+### A hosted relay, end to end
+
+`deploy/` provisions one on a fresh Ubuntu droplet — Caddy terminating TLS in
+front of a loopback-bound relay, systemd keeping it up, a token generated on
+the box and never in the repo:
+
+```sh
+scp -r deploy root@<droplet-ip>:/root/
+ssh root@<droplet-ip> 'DOMAIN=relay.knoot.dev bash /root/deploy/provision.sh'
+```
+
+Point an `A` record at the droplet first; Caddy gets the certificate itself on
+the first request. The script is idempotent — re-run it to deploy a new
+revision, and it keeps the existing token rather than rotating it out from
+under the team. It prints the enrollment commands when it finishes, and refuses
+to claim success without checking that the relay rejects an untokened request
+and accepts a tokened one.
+
+Only `/` and `/lab` are served without a token, and they are static shells: the
+event log, the repo list, and the websocket all check it. A browser cannot set
+a header, so open the dashboard once as `https://relay.knoot.dev/?token=<token>`
+and the page remembers it.
+
+
 ## How it works
 
 ```

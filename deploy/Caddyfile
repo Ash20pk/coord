@@ -1,0 +1,15 @@
+# TLS terminates here; the relay listens on loopback only.
+# Websockets need no special config — Caddy proxies the upgrade as-is.
+relay.knoot.dev {
+	encode zstd gzip
+
+	# The relay authenticates every data route itself (Bearer, or ?token= for
+	# the browser). /  and /lab are static shells that carry no data.
+	reverse_proxy 127.0.0.1:7420 {
+		# A claim acquisition is single-digit ms; a websocket lives for hours.
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+}

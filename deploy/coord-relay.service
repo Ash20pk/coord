@@ -1,0 +1,35 @@
+[Unit]
+Description=coord relay (sequenced event log + claim arbitration)
+Documentation=https://github.com/Ash20pk/coord
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=coord
+Group=coord
+# COORD_RELAY_TOKEN lives here, 0600, never in the repo.
+EnvironmentFile=/etc/coord/relay.env
+ExecStart=/usr/local/bin/coord relay --listen 127.0.0.1:7420 --db /var/lib/coord/relay.db
+Restart=always
+RestartSec=2
+
+# The relay only ever needs its own database. It spawns no processes unless
+# started with --lab-dir, which this unit deliberately does not pass.
+StateDirectory=coord
+StateDirectoryMode=0750
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ReadWritePaths=/var/lib/coord
+RestrictAddressFamilies=AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target
