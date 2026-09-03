@@ -167,11 +167,23 @@ Sign-in needs a Supabase project. Without one the relay still runs and agent
 tokens still work; the console simply says sign-in is not configured.
 
 ```sh
-# the browser bundle, at build time
-VITE_SUPABASE_URL=… VITE_SUPABASE_ANON_KEY=… npm --prefix web run build
-# the relay, at run time — it verifies a signed-in person's access token
-SUPABASE_URL=… SUPABASE_ANON_KEY=… SUPABASE_SERVICE_ROLE_KEY=… knoot relay
+# the browser bundle, at build time. The publishable key is public by design.
+VITE_SUPABASE_URL=… VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_… \
+  npm --prefix web run build
+
+# the relay, at run time — it verifies a signed-in person's access token.
+# The secret key never goes near the browser.
+SUPABASE_URL=… SUPABASE_PUBLISHABLE_KEY=sb_publishable_… \
+  SUPABASE_SECRET_KEY=sb_secret_… knoot relay
 ```
+
+These are Supabase's current API keys. The legacy `anon` and `service_role`
+JWTs still work and are still read under their old names
+(`SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `VITE_SUPABASE_ANON_KEY`),
+which matters because Supabase retires them at the end of 2026. The two formats
+are not interchangeable on the wire: a `sb_secret_…` key is not a JWT, so
+sending it as a bearer token is rejected as an invalid JWT. It goes in the
+`apikey` header alone, and `src/cloud.rs` has a test for each format.
 
 Apply `supabase/migrations/0001_teams.sql` first. It creates `teams` and
 `team_members` behind row-level security, so a browser holding the anon key can

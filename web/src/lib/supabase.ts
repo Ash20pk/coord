@@ -5,17 +5,24 @@ import { createClient, type SupabaseClient, type Session } from '@supabase/supab
  * belong to, and the metadata for each agent token. The event log stays on the
  * relay, because that is the thing that has to survive without a network.
  *
- * Keys are injected at build time. A build without them still serves every
+ * The key is injected at build time. A build without one still serves every
  * page; the console just explains that sign-in is not configured rather than
  * throwing on load.
+ *
+ * `sb_publishable_…` is the current browser-safe key. The legacy `anon` name
+ * is still read, because Supabase keeps both working until it retires the old
+ * keys at the end of 2026. Either way this is a public value: everything it
+ * can reach is behind row-level security.
  */
 const URL_ = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-const ANON = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+const PUBLISHABLE =
+  (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined) ??
+  (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined);
 
-export const configured = Boolean(URL_ && ANON);
+export const configured = Boolean(URL_ && PUBLISHABLE);
 
 export const supabase: SupabaseClient | null = configured
-  ? createClient(URL_!, ANON!, {
+  ? createClient(URL_!, PUBLISHABLE!, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
     })
   : null;

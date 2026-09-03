@@ -43,8 +43,10 @@ jobs:
 
       - name: Build the web front end
         env:
+          # The publishable key is public by design and ends up in the bundle.
+          # The secret key is never built in; the relay reads it at run time.
           VITE_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
         run: |
           npm --prefix web ci
           npm --prefix web run build

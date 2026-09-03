@@ -51,7 +51,7 @@ function showAuth(): void {
   authEl.hidden = false;
   paintAuthMode();
   if (!configured) {
-    authMessage('err', 'Sign-in is not configured on this deployment. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY, or run your own relay and use an agent token.');
+    authMessage('err', 'Sign-in is not configured on this deployment. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY at build time, or run your own relay and use an agent token.');
     ($('#auth-go') as HTMLButtonElement).disabled = true;
   }
 }

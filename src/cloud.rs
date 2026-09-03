@@ -29,8 +29,11 @@ pub struct Team {
 #[derive(Clone)]
 pub struct Cloud {
     url: String,
-    anon_key: String,
-    service_key: String,
+    /// Browser-safe key. `sb_publishable_…`, or a legacy `anon` JWT.
+    publishable_key: String,
+    /// Elevated key, server-side only. `sb_secret_…`, or a legacy
+    /// `service_role` JWT.
+    secret_key: String,
     http: reqwest::Client,
     cache: std::sync::Arc<Mutex<HashMap<String, (Instant, Option<Team>)>>>,
 }
@@ -40,18 +43,24 @@ impl Cloud {
     /// to a Supabase project. All three variables are required: a URL with no
     /// service key could verify a person but never find their team, which
     /// would fail in a way that looks like a permissions bug.
+    /// The key names follow Supabase's current vocabulary, and the legacy
+    /// names are still read so an existing deployment does not break the day
+    /// it upgrades. Supabase is retiring `anon` and `service_role` at the end
+    /// of 2026; both formats work until then, and this handles either.
     pub fn from_env() -> Option<Self> {
         let url = crate::config::env_or_legacy("SUPABASE_URL")?;
-        let anon_key = crate::config::env_or_legacy("SUPABASE_ANON_KEY")?;
-        let service_key = crate::config::env_or_legacy("SUPABASE_SERVICE_ROLE_KEY")?;
+        let publishable_key = crate::config::env_or_legacy("SUPABASE_PUBLISHABLE_KEY")
+            .or_else(|| crate::config::env_or_legacy("SUPABASE_ANON_KEY"))?;
+        let secret_key = crate::config::env_or_legacy("SUPABASE_SECRET_KEY")
+            .or_else(|| crate::config::env_or_legacy("SUPABASE_SERVICE_ROLE_KEY"))?;
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
             .ok()?;
         Some(Self {
             url: url.trim_end_matches('/').to_string(),
-            anon_key,
-            service_key,
+            publishable_key,
+            secret_key,
             http,
             cache: std::sync::Arc::new(Mutex::new(HashMap::new())),
         })
@@ -59,11 +68,11 @@ impl Cloud {
 
     /// Same wiring, pointed at a server the test controls.
     #[cfg(test)]
-    pub fn for_test(url: &str) -> Self {
+    pub fn for_test(url: &str, secret_key: &str) -> Self {
         Self {
             url: url.trim_end_matches('/').to_string(),
-            anon_key: "anon".into(),
-            service_key: "service".into(),
+            publishable_key: "sb_publishable_test".into(),
+            secret_key: secret_key.into(),
             http: reqwest::Client::new(),
             cache: std::sync::Arc::new(Mutex::new(HashMap::new())),
         }
@@ -106,7 +115,10 @@ impl Cloud {
         let user = self
             .http
             .get(format!("{}/auth/v1/user", self.url))
-            .header("apikey", &self.anon_key)
+            .header("apikey", &self.publishable_key)
+            // Here the bearer token is the person's access token, which is a
+            // real JWT. The API key rides in `apikey`, which is correct for
+            // both key formats.
             .bearer_auth(access_token)
             .send()
             .await
@@ -117,19 +129,25 @@ impl Cloud {
         let user: serde_json::Value = user.json().await.ok()?;
         let user_id = user.get("id")?.as_str()?.to_string();
 
-        // The service key is used only here, for a read keyed by the user id
-        // we just proved. It never reaches the browser.
-        let rows = self
+        // The secret key is used only here, for a read keyed by the user id we
+        // just proved. It never reaches the browser.
+        let req = self
             .http
             .get(format!(
                 "{}/rest/v1/team_members?user_id=eq.{}&select=team_id,teams(name)&limit=1",
                 self.url, user_id
             ))
-            .header("apikey", &self.service_key)
-            .bearer_auth(&self.service_key)
-            .send()
-            .await
-            .ok()?;
+            .header("apikey", &self.secret_key);
+        // A `sb_secret_…` key is not a JWT. Sent as a bearer token it is
+        // parsed as one and the request is refused as an invalid JWT, so the
+        // header is added only for a legacy `service_role` key, which is a JWT
+        // and whose role Postgres reads out of it.
+        let req = if Self::looks_like_jwt(&self.secret_key) {
+            req.bearer_auth(&self.secret_key)
+        } else {
+            req
+        };
+        let rows = req.send().await.ok()?;
         if !rows.status().is_success() {
             return None;
         }
@@ -153,7 +171,15 @@ mod tests {
 
     /// A stand-in for the two Supabase endpoints this module calls, so the
     /// exchange is exercised for real rather than mocked at the seam.
+    /// Records the `Authorization` header PostgREST was sent, so the test can
+    /// assert on what actually went over the wire.
+    type SeenAuth = std::sync::Arc<Mutex<Option<Option<String>>>>;
+
     async fn stub() -> String {
+        stub_recording(Default::default()).await
+    }
+
+    async fn stub_recording(seen: SeenAuth) -> String {
         use axum::{routing::get, Router, Json};
         let app = Router::new()
             .route("/auth/v1/user", get(|headers: axum::http::HeaderMap| async move {
@@ -167,13 +193,21 @@ mod tests {
                     (axum::http::StatusCode::UNAUTHORIZED, "no").into_response()
                 }
             }))
-            .route("/rest/v1/team_members", get(|uri: axum::http::Uri| async move {
-                // The lookup must be keyed by the id we just proved, never by
-                // anything the caller supplied.
-                assert!(uri.query().unwrap().contains("user_id=eq.user-1"));
-                Json(serde_json::json!([
-                    { "team_id": "team-abc", "teams": { "name": "Platform team" } }
-                ]))
+            .route("/rest/v1/team_members", get(move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
+                let seen = seen.clone();
+                async move {
+                    // The lookup must be keyed by the id we just proved, never
+                    // by anything the caller supplied.
+                    assert!(uri.query().unwrap().contains("user_id=eq.user-1"));
+                    *seen.lock().unwrap() = Some(
+                        headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .map(|v| v.to_str().unwrap().to_string()),
+                    );
+                    Json(serde_json::json!([
+                        { "team_id": "team-abc", "teams": { "name": "Platform team" } }
+                    ]))
+                }
             }));
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
@@ -181,9 +215,36 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Supabase's current keys (`sb_secret_…`) are not JWTs. Sent as a bearer
+    /// token they are parsed as one and the request is refused as an invalid
+    /// JWT, which would break every team lookup on a project that has migrated
+    /// off the legacy keys.
+    #[tokio::test]
+    async fn a_new_format_secret_key_is_never_sent_as_a_bearer_token() {
+        let seen: SeenAuth = Default::default();
+        let cloud = Cloud::for_test(&stub_recording(seen.clone()).await, "sb_secret_abcdef123456");
+        cloud.team_for_token("good.token.sig").await.expect("should resolve");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(None),
+            "the secret key belongs in the apikey header only"
+        );
+    }
+
+    /// A legacy `service_role` key is a JWT and Postgres reads the role out of
+    /// it, so that one still needs the bearer header.
+    #[tokio::test]
+    async fn a_legacy_service_role_key_still_gets_the_bearer_header() {
+        let seen: SeenAuth = Default::default();
+        let legacy = "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.sig";
+        let cloud = Cloud::for_test(&stub_recording(seen.clone()).await, legacy);
+        cloud.team_for_token("good.token.sig").await.expect("should resolve");
+        assert_eq!(*seen.lock().unwrap(), Some(Some(format!("Bearer {legacy}"))));
+    }
+
     #[tokio::test]
     async fn a_valid_access_token_resolves_to_its_team() {
-        let cloud = Cloud::for_test(&stub().await);
+        let cloud = Cloud::for_test(&stub().await, "sb_secret_abcdef123456");
         let team = cloud.team_for_token("good.token.sig").await.expect("should resolve");
         assert_eq!(team.id, "team-abc");
         assert_eq!(team.name, "Platform team");
@@ -191,7 +252,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_token_supabase_rejects_authenticates_nothing() {
-        let cloud = Cloud::for_test(&stub().await);
+        let cloud = Cloud::for_test(&stub().await, "sb_secret_abcdef123456");
         assert!(cloud.team_for_token("stale.token.sig").await.is_none());
     }
 
@@ -200,7 +261,7 @@ mod tests {
     /// auth endpoint.
     #[tokio::test]
     async fn refusals_are_cached_too() {
-        let cloud = Cloud::for_test("http://127.0.0.1:1");   // nothing listening
+        let cloud = Cloud::for_test("http://127.0.0.1:1", "sb_secret_abcdef123456");   // nothing listening
         assert!(cloud.team_for_token("good.token.sig").await.is_none());
         assert!(cloud.cache.lock().unwrap().contains_key("good.token.sig"));
     }
