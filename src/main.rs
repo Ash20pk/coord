@@ -325,6 +325,9 @@ fn which_knoot() -> Option<PathBuf> {
 /// way for a human to tell "nothing collided" from "nothing was watching".
 fn status() -> Result<()> {
     let mut problems: Vec<String> = Vec::new();
+    // Neither on nor broken: the first relay dial has not finished. Kept apart
+    // from `problems` because there is nothing for the reader to fix.
+    let mut still_dialing = false;
     let ok = |b: bool| if b { "ok  " } else { "FAIL" };
 
     // 1. the binary the committed hooks call by name
@@ -443,7 +446,7 @@ fn status() -> Result<()> {
             // merely young. It cost an hour of chasing a phantom to notice.
             Some((false, _, None)) => {
                 println!("[..  ] relay     {} connecting… ({token_note})", c.relay);
-                println!("                 run `knoot status` again in a moment");
+                still_dialing = true;
             }
             Some((false, _, err)) => {
                 println!("[FAIL] relay     {} unreachable ({token_note})", c.relay);
@@ -472,7 +475,13 @@ fn status() -> Result<()> {
     }
 
     println!();
-    if problems.is_empty() {
+    if problems.is_empty() && still_dialing {
+        // Saying "coordination is on" here would be a guess, and saying it is
+        // off would be a false alarm. The honest answer is that we do not know
+        // yet, and when we will.
+        println!("coordination is starting — the relay dial is still in flight.");
+        println!("Run `knoot status` again in a moment; nothing here needs fixing.");
+    } else if problems.is_empty() {
         println!("coordination is on.");
     } else {
         println!("coordination is OFF or partial. Edits are still allowed — knoot fails open —");

@@ -264,6 +264,10 @@ detection case and was reverted; the honest limitation is documented instead.
     it and spending an hour chasing a server-side phantom. It already had what
     it needed to tell the difference: no connection *and* no recorded error
     means the first dial is still in flight, which now reads `connecting…`.
+    The summary line agreed with the old lie for one more commit: it printed
+    `coordination is on` under a relay line saying `connecting…`, because a
+    dial in flight is not a problem to fix and the summary keyed off the
+    problem list. Neither "on" nor "off" is true there, so it now says which.
 
 17. **The conflict brief reported the wrong intent, in two directions.** A
     claim stores the intent its holder had when it took the file, and the brief
