@@ -174,11 +174,32 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                     };
                     deny(&path, &c)
                 }
+                Ok(Ok(ServerMsg::ClaimResp { granted: true, .. })) => {
+                    rc.pending.lock().unwrap().remove(&id);
+                    // Record the win in our own mirror *now*, rather than
+                    // waiting for the relay to broadcast it back to us.
+                    //
+                    // Every mirror-only check — Bash gating, and the presence
+                    // context handed to the next prompt — would otherwise read
+                    // this file as free for as long as that round trip takes.
+                    // Which is a real bypass, not a cosmetic lag: a peer
+                    // session on this machine could `sed -i` a file we hold,
+                    // because the Bash gate never asks the relay. macOS won
+                    // that race and Linux lost it, so it took CI to see.
+                    //
+                    // Applying it twice is harmless: the relay's copy arrives
+                    // shortly and `View::apply` renews a claim on the same
+                    // session and path rather than duplicating it.
+                    claim_locally(&rc, &sess_for_warn, &path);
+                    warn_cross_branch(&rc, &sess_for_warn, &path);
+                    DResp::Decision { allow: true, reason: None }
+                }
                 _ => {
                     rc.pending.lock().unwrap().remove(&id);
-                    // Granted, or timed out → fail open. Either way the write
-                    // is happening, so this is the moment to say whether it is
-                    // being written on top of another branch's work.
+                    // Timed out, or the relay went away mid-request → fail
+                    // open. We must *not* record a claim here: we do not know
+                    // that we hold it, and a mirror that invents claims would
+                    // block peers over a file nobody owns.
                     warn_cross_branch(&rc, &sess_for_warn, &path);
                     DResp::Decision { allow: true, reason: None }
                 }

@@ -1052,3 +1052,50 @@ async fn a_session_idle_past_the_old_prune_window_keeps_its_identity() {
         "45 minutes idle at a prompt is alive, not stale"
     );
 }
+
+/// A granted claim must be in this daemon's own mirror by the time the hook
+/// returns — not whenever the relay's broadcast gets back to us.
+///
+/// The Bash gate consults only the local mirror, so anything the mirror has
+/// not caught up on is a file a peer session can `sed -i` freely. The window
+/// is milliseconds, which is exactly long enough: the previous version of this
+/// passed on macOS and failed on Linux CI, having been written as a race
+/// rather than as an assertion. Against `start_granting_relay` the broadcast
+/// never arrives at all, so the assertion holds on every machine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_granted_claim_is_in_the_local_mirror_before_the_hook_returns() {
+    let url = start_granting_relay().await;
+    let sock = start_daemon().await;
+    let root = tmp("mirror-lag");
+    init_repo(&root, &url, "e2e-mirror-lag");
+
+    hook(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "sessA",
+        "cwd": root.to_string_lossy()
+    }));
+    // sessA takes the file through the arbitrated path.
+    let out = hook(&sock, edit(&root, "sessA", "src/auth.ts", "PreToolUse"));
+    assert!(out.is_none(), "the relay granted it, so it must be allowed: {out:?}");
+
+    // With no broadcast coming, the only way sessB can be stopped is if the
+    // grant was recorded locally the moment it was won.
+    let target = format!("{}/src/auth.ts", root.to_string_lossy());
+    for cmd in [format!("echo x >> {target}"), "sed -i '' 's/a/b/' src/auth.ts".to_string()] {
+        let denial = hook(&sock, json!({
+            "hook_event_name": "PreToolUse", "session_id": "sessB",
+            "cwd": root.to_string_lossy(), "tool_name": "Bash",
+            "tool_input": { "command": cmd }
+        }));
+        let denial = denial.unwrap_or_else(|| {
+            panic!("a peer's Bash write to a claimed file must be blocked: {cmd}")
+        });
+        assert_eq!(
+            denial["hookSpecificOutput"]["permissionDecision"], "deny",
+            "must be a denial, not merely output: {denial}"
+        );
+    }
+
+    // And the same must hold for the Edit path.
+    let edit_denial = hook(&sock, edit(&root, "sessB", "src/auth.ts", "PreToolUse"));
+    assert!(edit_denial.is_some(), "a peer's Edit of a claimed file must be blocked too");
+}

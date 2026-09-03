@@ -239,9 +239,25 @@ detection case and was reverted; the honest limitation is documented instead.
     which is the identity that gates the lab's ptys. Found while writing the
     test that a registered team is not an operator.
 
+14. **A granted claim was not in the granting daemon's own mirror.** The
+    daemon learned about its own wins twice — once from the ClaimResp, again
+    when the relay broadcast the event back — and relied on the second. In
+    between, its mirror read the file as free, and the Bash gate consults only
+    that mirror, so a peer session on the same machine could `sed -i` a file
+    this daemon held. Found by CI: it passed on macOS and failed on Linux,
+    because the original test was written as a race rather than as an
+    assertion. The replacement uses a relay double that grants claims and
+    never broadcasts, so the window is infinite and every platform sees it.
+
 Bug 11 is the pattern behind most of this list: a check that reports on the
 thing it can see rather than the thing you asked about. `coord status` exists
 because fail-open makes "off" invisible, and it was itself guessing.
+
+Bug 14 adds a second pattern worth naming: a test that can only fail by losing
+a race is a test that passes on the machine you wrote it on. Two of the four
+layers now contain a deliberately hostile relay — one unresponsive, one that
+grants and stays silent — because a fake that behaves badly on purpose turns a
+timing bug into an assertion.
 
 The suite is now honest about its own limits: a test named
 `daemon_survives_relay_restart` never restarted anything and was renamed, four

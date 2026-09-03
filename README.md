@@ -73,20 +73,47 @@ the box and never in the repo:
 
 ```sh
 scp -r deploy root@<droplet-ip>:/root/
-ssh root@<droplet-ip> 'DOMAIN=relay.knoot.dev bash /root/deploy/provision.sh'
+ssh root@<droplet-ip> 'DOMAIN=relay.example.com APEX=example.com bash /root/deploy/provision.sh'
 ```
 
-Point an `A` record at the droplet first; Caddy gets the certificate itself on
-the first request. The script is idempotent — re-run it to deploy a new
-revision, and it keeps the existing token rather than rotating it out from
-under the team. It prints the enrollment commands when it finishes, and refuses
-to claim success without checking that the relay rejects an untokened request
-and accepts a tokened one.
+Point `A` records for both names at the droplet first; Caddy gets the
+certificates itself on the first request. The script is idempotent — re-run it
+to deploy a new revision, and it keeps the existing token rather than rotating
+it out from under the team. It refuses to claim success without checking that
+the relay rejects an untokened request, accepts a tokened one, validates
+registration input, and has a replicable event log.
 
-Only `/` and `/lab` are served without a token, and they are static shells: the
-event log, the repo list, and the websocket all check it. A browser cannot set
-a header, so open the dashboard once as `https://relay.knoot.dev/?token=<token>`
-and the page remembers it.
+**It downloads the binary rather than building it.** CI publishes a static
+musl build to the `nightly` release on every push to `main`; the provisioner
+verifies its checksum and swaps it in only once everything around it is in
+place, so a failed download leaves the running version untouched. A 1 vCPU /
+1 GB box needs a 2 GB swapfile to link this at all, and would be doing it
+while serving the relay it is about to replace. `SOURCE=build` still compiles
+on the box if you want that.
+
+Only `/` and `/app` and `/ops` are served without a token, and they are static
+shells: the event log, the repo list, the team API, and the websocket all check
+it. A browser cannot set a header, so the console takes `?token=` once and
+keeps it in `localStorage`.
+
+### Not losing the log
+
+The event log is the product. Two layers, because they fail differently:
+
+- **Nightly snapshots, on the box.** A `sqlite3 .backup` — never `cp`, which
+  half-copies a WAL database into one that restores as corrupt — gzipped, 7
+  kept. This covers what actually happens: a bad `DELETE`, a corrupted page, a
+  mistake.
+- **Continuous replication, off the box,** via Litestream, which covers losing
+  the droplet: ten seconds of loss rather than a day. It needs object-storage
+  credentials, so it turns itself on only once `/etc/coord/litestream.env`
+  exists and says so loudly while it is off — a backup that silently does
+  nothing is worse than one you know you do not have.
+
+Litestream reads the write-ahead log, so the relay sets `journal_mode=WAL`
+(with `synchronous=NORMAL`, which keeps a disk flush off the claim path). That
+is asserted by a test: against a rollback-journal database, replication copies
+nothing and reports success.
 
 
 ## knoot.dev
@@ -258,7 +285,7 @@ dashboard/audit surface over the event log.
 ## Tests
 
 ```sh
-cargo test          # 139 tests, ~4s
+cargo test          # 140 tests, ~4s
 ```
 
 Four layers:
@@ -270,6 +297,7 @@ Four layers:
 | Failure | `tests/failure.rs` | fail-open on dead daemon, dead relay, unresponsive relay, malformed input; crash recovery via lease expiry |
 | Contract | `tests/e2e.rs` | real Claude Code hook payloads through the binary; exact deny/context JSON; latency ceiling |
 | Multi-tenancy | `tests/teams_api.rs` | registration, token minting/revocation, and that one team cannot read, list, or revoke another's anything |
+| Durability | `tests/failure.rs` | claims and sequence numbers survive a relay restart; the log stays replicable (WAL) |
 
 One test is kept **red on purpose**: `bash_write_to_a_claimed_file_is_blocked`
 (`#[ignore]`d) specifies behaviour v1 does not have. See Known gaps.

@@ -212,3 +212,56 @@ pub fn watch_ungated(url: &str, repo: &str) -> std::sync::Arc<std::sync::atomic:
 pub fn ask_daemon(sock: &PathBuf, req: DReq) -> Option<DResp> {
     coord::hook::call_daemon_at(sock, &req)
 }
+
+/// A relay that grants every claim and then says nothing else — no event
+/// broadcast, ever.
+///
+/// Its purpose is to make one specific race deterministic. The daemon learns
+/// about its own granted claims twice: once from the ClaimResp, and again when
+/// the relay broadcasts the ClaimAcquired event back. If the daemon relies on
+/// the second, then between the two its own mirror reads the file as free —
+/// and the Bash gate consults only that mirror, so a peer session can write a
+/// file this daemon holds. Against this double the second delivery never
+/// comes, so a mirror that waits for it stays empty forever and the bypass
+/// shows up on every platform rather than only on a slow one.
+pub async fn start_granting_relay() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else { return };
+            tokio::spawn(async move {
+                let Ok(ws) = tokio_tungstenite::accept_async(stream).await else { return };
+                let (mut w, mut r) = ws.split();
+                while let Some(Ok(WsMsg::Text(t))) = r.next().await {
+                    let Ok(msg) = serde_json::from_str::<ClientMsg>(&t) else { continue };
+                    let reply = match msg {
+                        // The daemon will not answer from an empty mirror until
+                        // a snapshot has landed, so it still needs a Welcome.
+                        ClientMsg::Hello { .. } => Some(ServerMsg::Welcome {
+                            seq: 0,
+                            claims: vec![],
+                            sessions: vec![],
+                        }),
+                        ClientMsg::ClaimReq { id, .. } => Some(ServerMsg::ClaimResp {
+                            id,
+                            granted: true,
+                            holder: None,
+                            holder_user: None,
+                            holder_intent: None,
+                            lease_until: Some(now_ms() + 600_000),
+                        }),
+                        // Appends are swallowed: no echo, no broadcast.
+                        _ => None,
+                    };
+                    if let Some(m) = reply {
+                        if w.send(WsMsg::Text(serde_json::to_string(&m).unwrap())).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    format!("ws://{addr}/ws")
+}
