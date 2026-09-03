@@ -31,6 +31,20 @@ if ! command -v caddy >/dev/null; then
 	apt-get install -y -qq caddy
 fi
 
+say "swap"
+# A 1 vCPU / 1 GB droplet cannot link a release build with LTO on RAM alone.
+# 2 GB of swap is cheaper than a smaller binary or a bigger droplet.
+if ! swapon --show --noheadings | grep -q .; then
+	fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+	chmod 600 /swapfile
+	mkswap -q /swapfile
+	swapon /swapfile
+	grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+	echo "   2G swapfile on, and in fstab"
+else
+	echo "   already has swap"
+fi
+
 say "rust"
 if ! [[ -x /root/.cargo/bin/cargo ]]; then
 	curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal
@@ -46,7 +60,9 @@ else
 	git -C /opt/coord checkout --quiet -B deploy "origin/$REF"
 fi
 echo "   $(git -C /opt/coord rev-parse --short HEAD)  $(git -C /opt/coord log -1 --format=%s)"
-cargo build --release --manifest-path /opt/coord/Cargo.toml
+# One job at a time: parallel rustc on 1 vCPU only competes for the memory
+# the linker is about to need.
+CARGO_BUILD_JOBS=1 cargo build --release --manifest-path /opt/coord/Cargo.toml
 install -m 0755 /opt/coord/target/release/coord /usr/local/bin/coord
 
 say "user + state"
