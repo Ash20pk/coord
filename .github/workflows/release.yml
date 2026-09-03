@@ -45,18 +45,18 @@ jobs:
 
       - name: Package
         run: |
-          install -m 0755 target/x86_64-unknown-linux-musl/release/coord coord-x86_64-linux
+          install -m 0755 target/x86_64-unknown-linux-musl/release/knoot knoot-x86_64-linux
           # Statically linked, or the whole point — one artifact that runs on
           # any Linux regardless of its glibc — is lost. `file` is the
           # authority here: musl produces a static-pie, for which `ldd` prints
           # "statically linked" rather than "not a dynamic executable", so
           # grepping ldd fails a binary that is in fact fine.
-          file coord-x86_64-linux
-          file coord-x86_64-linux | grep -qE "static-pie linked|statically linked" \
+          file knoot-x86_64-linux
+          file knoot-x86_64-linux | grep -qE "static-pie linked|statically linked" \
             || { echo "binary is not statically linked"; exit 1; }
-          ./coord-x86_64-linux --version
-          sha256sum coord-x86_64-linux > coord-x86_64-linux.sha256
-          cat coord-x86_64-linux.sha256
+          ./knoot-x86_64-linux --version
+          sha256sum knoot-x86_64-linux > knoot-x86_64-linux.sha256
+          cat knoot-x86_64-linux.sha256
 
       # A single moving tag the provisioner can always point at, plus the
       # commit it was built from so a deploy is traceable to a revision.
@@ -70,4 +70,4 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "nightly ($(git rev-parse --short "$GITHUB_SHA"))" \
             --notes "Static x86_64 Linux build of $(git rev-parse --short "$GITHUB_SHA"): $(git log -1 --format=%s "$GITHUB_SHA")" \
-            coord-x86_64-linux coord-x86_64-linux.sha256
+            knoot-x86_64-linux knoot-x86_64-linux.sha256

@@ -1,10 +1,10 @@
 //! Layer 3: fail-open is a product promise, not an implementation detail.
-//! Every degraded path must end in "allow, silently" — coord may never be
+//! Every degraded path must end in "allow, silently" — knoot may never be
 //! the reason an agent can't work.
 
 mod common;
 use common::*;
-use coord::proto::*;
+use knoot::proto::*;
 
 const REPO_ID: &str = "failure-tests";
 
@@ -27,9 +27,9 @@ async fn no_daemon_running_means_allow() {
 #[tokio::test]
 async fn repo_without_coord_config_is_allowed() {
     let sock = start_daemon().await;
-    let root = tmp("uninit"); // no .coord.toml
+    let root = tmp("uninit"); // no .knoot.toml
     let r = ask(&sock, prewrite(&root, "s1", "src/auth.ts")).await;
-    assert!(allowed(&r), "a non-coord repo must never be gated");
+    assert!(allowed(&r), "a non-knoot repo must never be gated");
 }
 
 #[tokio::test]
@@ -184,12 +184,12 @@ async fn an_unauthenticated_client_is_refused_by_the_relay() {
 /// A `wss://` relay is the whole point of hosting one, and it used to panic
 /// inside the daemon's relay task on the first handshake: rustls 0.23 will not
 /// pick a crypto provider for you, and the refusal is a panic rather than an
-/// error. Because coord fails open, the visible result was a repo that looked
+/// error. Because knoot fails open, the visible result was a repo that looked
 /// coordinated and was not — the relay's event log stayed empty while
-/// `coord status` printed `[ok] relay`. Found by deploying one.
+/// `knoot status` printed `[ok] relay`. Found by deploying one.
 #[tokio::test]
 async fn a_wss_relay_does_not_panic_the_dialer() {
-    coord::install_tls_provider();
+    knoot::install_tls_provider();
     assert!(
         rustls::crypto::CryptoProvider::get_default().is_some(),
         "no default crypto provider: the next wss:// handshake panics"
@@ -224,7 +224,7 @@ async fn a_restarted_relay_recovers_its_claims_and_its_sequence() {
     let db = common::tmp("restart").join("relay.db");
 
     // First life: ash takes a file.
-    let addr = coord::relay::start_with_token("127.0.0.1:0", db.clone(), None).await.unwrap();
+    let addr = knoot::relay::start_with_token("127.0.0.1:0", db.clone(), None).await.unwrap();
     let url = format!("ws://{addr}/ws");
     {
         let mut ash = common::Client::connect(&url, "r1").await;
@@ -241,7 +241,7 @@ async fn a_restarted_relay_recovers_its_claims_and_its_sequence() {
     assert!(seq_before > 0, "the first life must have written a sequenced log");
 
     // Second life: a new relay process over the same database.
-    let addr2 = coord::relay::start_with_token("127.0.0.1:0", db.clone(), None).await.unwrap();
+    let addr2 = knoot::relay::start_with_token("127.0.0.1:0", db.clone(), None).await.unwrap();
     let url2 = format!("ws://{addr2}/ws");
 
     // priya, arriving after the restart, must still be refused.
@@ -275,7 +275,7 @@ async fn a_restarted_relay_recovers_its_claims_and_its_sequence() {
 #[tokio::test]
 async fn the_event_log_is_replicable() {
     let db = common::tmp("wal").join("relay.db");
-    let addr = coord::relay::start_with_token("127.0.0.1:0", db.clone(), None).await.unwrap();
+    let addr = knoot::relay::start_with_token("127.0.0.1:0", db.clone(), None).await.unwrap();
 
     let mut c = common::Client::connect(&format!("ws://{addr}/ws"), "r1").await;
     assert!(c.request_claim("s1", "src/a.js", "work").await);

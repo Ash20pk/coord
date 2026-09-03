@@ -11,7 +11,7 @@ use common::tmp;
 /// A relay with the team API, returned as a plain http:// base.
 async fn start_api(token: Option<&str>) -> String {
     let db = tmp("teams").join("relay.db");
-    let addr = coord::relay::start_with_token("127.0.0.1:0", db, token.map(str::to_string))
+    let addr = knoot::relay::start_with_token("127.0.0.1:0", db, token.map(str::to_string))
         .await
         .unwrap();
     format!("http://{addr}")
@@ -254,7 +254,7 @@ async fn registration_is_rate_limited() {
 #[tokio::test]
 async fn the_site_and_console_are_served_by_the_relay_itself() {
     let base = start_api(Some("secret")).await;
-    for (path, needle) in [("/", "knoot"), ("/app", "Console"), ("/ops", "coord")] {
+    for (path, needle) in [("/", "knoot"), ("/app", "Console"), ("/ops", "knoot")] {
         let (code, _) = get(&format!("{base}{path}"), None).await;
         assert_eq!(code, 200, "{path} must be public — it carries no data");
         let _ = needle;

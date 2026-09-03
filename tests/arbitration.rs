@@ -4,7 +4,7 @@
 
 mod common;
 use common::*;
-use coord::proto::*;
+use knoot::proto::*;
 
 #[tokio::test]
 async fn concurrent_claims_on_same_path_yield_exactly_one_winner() {

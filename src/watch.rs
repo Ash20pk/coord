@@ -1,4 +1,4 @@
-//! `coord watch` — a live view of who is working where. Connects to the relay
+//! `knoot watch` — a live view of who is working where. Connects to the relay
 //! as a read-only client, mirrors the event log, and redraws a dashboard.
 
 use crate::config::RepoConfig;
@@ -30,7 +30,7 @@ struct State {
 }
 
 pub async fn run(repo_root: std::path::PathBuf) -> Result<()> {
-    let cfg = RepoConfig::load(&repo_root).context("no .coord.toml — run `coord init` first")?;
+    let cfg = RepoConfig::load(&repo_root).context("no .knoot.toml — run `knoot init` first")?;
     let st = Arc::new(Mutex::new(State {
         view: View::default(),
         feed: VecDeque::new(),
@@ -191,7 +191,7 @@ fn render(s: &State, cfg: &RepoConfig) -> String {
     let dot = if s.connected { format!("{GREEN}●{R}") } else { format!("{RED}●{R}") };
     let live = s.view.sessions.len();
     out.push_str(&format!(
-        "{BOLD}coord{R} {}  {DIM}{}{R}   {BOLD}{}{R} session(s)   {BOLD}{}{R} claim(s)   \
+        "{BOLD}knoot{R} {}  {DIM}{}{R}   {BOLD}{}{R} session(s)   {BOLD}{}{R} claim(s)   \
          writes {BOLD}{}{R}   blocked {BOLD}{}{}{R}   ungated {BOLD}{}{}{R}\n",
         dot,
         cfg.repo,

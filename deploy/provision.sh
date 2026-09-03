@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provision a droplet to host the coord relay behind TLS.
+# Provision a droplet to host the knoot relay behind TLS.
 #
 #   scp -r deploy root@<ip>:/root/ && ssh root@<ip> 'bash /root/deploy/provision.sh'
 #
@@ -8,15 +8,15 @@
 #   APEX=knoot.dev             hostname serving the site and console
 #   SOURCE=release|build       download the CI binary (default) or compile here
 #   REF=main                   revision, when SOURCE=build
-#   REPO=https://github.com/Ash20pk/coord.git
+#   REPO=https://github.com/Ash20pk/knoot.git
 set -euo pipefail
 
 DOMAIN="${DOMAIN:-relay.knoot.dev}"
 APEX="${APEX:-knoot.dev}"
 SOURCE="${SOURCE:-release}"
 REF="${REF:-main}"
-REPO="${REPO:-https://github.com/Ash20pk/coord.git}"
-RELEASE_URL="${RELEASE_URL:-https://github.com/Ash20pk/coord/releases/download/nightly}"
+REPO="${REPO:-https://github.com/Ash20pk/knoot.git}"
+RELEASE_URL="${RELEASE_URL:-https://github.com/Ash20pk/knoot/releases/download/nightly}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
@@ -47,17 +47,17 @@ fi
 if [[ "$SOURCE" == "release" ]]; then
 	say "binary (prebuilt, from CI)"
 	tmp="$(mktemp -d)"
-	curl -fsSL -o "$tmp/coord" "$RELEASE_URL/coord-x86_64-linux"
-	curl -fsSL -o "$tmp/coord.sha256" "$RELEASE_URL/coord-x86_64-linux.sha256"
+	curl -fsSL -o "$tmp/knoot" "$RELEASE_URL/knoot-x86_64-linux"
+	curl -fsSL -o "$tmp/knoot.sha256" "$RELEASE_URL/knoot-x86_64-linux.sha256"
 	# The checksum is published by the same run that built the binary, so this
 	# catches a truncated download rather than a malicious one — worth having
 	# for the former, and not claimed to protect against the latter.
-	want="$(awk '{print $1}' "$tmp/coord.sha256")"
-	got="$(sha256sum "$tmp/coord" | awk '{print $1}')"
+	want="$(awk '{print $1}' "$tmp/knoot.sha256")"
+	got="$(sha256sum "$tmp/knoot" | awk '{print $1}')"
 	[[ "$want" == "$got" ]] || { echo "checksum mismatch: $got != $want" >&2; exit 1; }
-	chmod 0755 "$tmp/coord"
-	"$tmp/coord" --version
-	install -m 0755 "$tmp/coord" /usr/local/bin/coord.new
+	chmod 0755 "$tmp/knoot"
+	"$tmp/knoot" --version
+	install -m 0755 "$tmp/knoot" /usr/local/bin/knoot.new
 	rm -rf "$tmp"
 else
 	say "swap (a 1 GB box cannot link this without it)"
@@ -80,30 +80,70 @@ else
 	export PATH="/root/.cargo/bin:$PATH"
 
 	say "build $REF"
-	if [[ -d /opt/coord/.git ]]; then
-		git -C /opt/coord fetch --quiet origin "$REF"
-		git -C /opt/coord checkout --quiet -B deploy "origin/$REF"
+	if [[ -d /opt/knoot/.git ]]; then
+		git -C /opt/knoot fetch --quiet origin "$REF"
+		git -C /opt/knoot checkout --quiet -B deploy "origin/$REF"
 	else
-		git clone --quiet "$REPO" /opt/coord
-		git -C /opt/coord checkout --quiet -B deploy "origin/$REF"
+		git clone --quiet "$REPO" /opt/knoot
+		git -C /opt/knoot checkout --quiet -B deploy "origin/$REF"
 	fi
-	echo "   $(git -C /opt/coord rev-parse --short HEAD)  $(git -C /opt/coord log -1 --format=%s)"
+	echo "   $(git -C /opt/knoot rev-parse --short HEAD)  $(git -C /opt/knoot log -1 --format=%s)"
 	# One job at a time: parallel rustc on 1 vCPU only competes for the memory
 	# the linker is about to need.
-	CARGO_BUILD_JOBS=1 cargo build --release --manifest-path /opt/coord/Cargo.toml
-	install -m 0755 /opt/coord/target/release/coord /usr/local/bin/coord.new
+	CARGO_BUILD_JOBS=1 cargo build --release --manifest-path /opt/knoot/Cargo.toml
+	install -m 0755 /opt/knoot/target/release/knoot /usr/local/bin/knoot.new
+fi
+
+# ---------------------------------------------------------------------------
+# Migration from the old name. Runs once and is a no-op thereafter.
+#
+# The operator token is the thing that must survive: it is not stored anywhere
+# else, and losing it does not stop the relay — it starts an *open* one. The
+# database moves with it, because it holds every team's hashed tokens and the
+# whole event log.
+# ---------------------------------------------------------------------------
+if [[ -d /var/lib/coord || -f /etc/coord/relay.env || -f /etc/systemd/system/coord-relay.service ]]; then
+	say "migrating from coord"
+	systemctl stop coord-relay.service coord-snapshot.timer 2>/dev/null || true
+	systemctl disable coord-relay.service coord-snapshot.timer 2>/dev/null || true
+	rm -f /etc/systemd/system/coord-relay.service \
+		/etc/systemd/system/coord-snapshot.service \
+		/etc/systemd/system/coord-snapshot.timer \
+		/usr/local/bin/coord-snapshot
+	systemctl daemon-reload
+
+	id -u knoot >/dev/null 2>&1 || useradd --system --home /var/lib/knoot --shell /usr/sbin/nologin knoot
+	if [[ -d /var/lib/coord && ! -d /var/lib/knoot ]]; then
+		mv /var/lib/coord /var/lib/knoot
+		chown -R knoot:knoot /var/lib/knoot
+		echo "   moved the event log to /var/lib/knoot ($(du -sh /var/lib/knoot | cut -f1))"
+	fi
+
+	install -d -m 0755 /etc/knoot
+	for f in relay.env litestream.env; do
+		if [[ -f /etc/coord/$f && ! -f /etc/knoot/$f ]]; then
+			# Rename the variables inside as well as the file around them.
+			sed 's/^COORD_/KNOOT_/' "/etc/coord/$f" > "/etc/knoot/$f"
+			chmod 0600 "/etc/knoot/$f"
+			echo "   carried over /etc/coord/$f (token preserved)"
+		fi
+	done
+	# Left in place rather than deleted: if anything here was wrong, the old
+	# files are the only copy of a token nobody wrote down.
+	[[ -d /etc/coord ]] && echo "   /etc/coord left in place — remove it once you are satisfied"
+	rm -f /usr/local/bin/coord
 fi
 
 say "user + state"
-id -u coord >/dev/null 2>&1 || useradd --system --home /var/lib/coord --shell /usr/sbin/nologin coord
-install -d -o coord -g coord -m 0750 /var/lib/coord
-install -d -o coord -g coord -m 0750 /var/lib/coord/snapshots
+id -u knoot >/dev/null 2>&1 || useradd --system --home /var/lib/knoot --shell /usr/sbin/nologin knoot
+install -d -o knoot -g knoot -m 0750 /var/lib/knoot
+install -d -o knoot -g knoot -m 0750 /var/lib/knoot/snapshots
 
 say "token"
-install -d -m 0755 /etc/coord
-if ! [[ -s /etc/coord/relay.env ]]; then
-	printf 'COORD_RELAY_TOKEN=%s\n' "$(openssl rand -hex 24)" > /etc/coord/relay.env
-	chmod 0600 /etc/coord/relay.env
+install -d -m 0755 /etc/knoot
+if ! [[ -s /etc/knoot/relay.env ]]; then
+	printf 'KNOOT_RELAY_TOKEN=%s\n' "$(openssl rand -hex 24)" > /etc/knoot/relay.env
+	chmod 0600 /etc/knoot/relay.env
 	echo "   generated a new token"
 else
 	echo "   keeping the existing token"
@@ -116,38 +156,38 @@ fi
 #               actually happens: a bad DELETE, a corrupted page, a mistake.
 #   litestream — continuous replication off the box. Covers losing the droplet.
 #               Needs object-storage credentials, so it configures itself only
-#               once /etc/coord/litestream.env exists.
+#               once /etc/knoot/litestream.env exists.
 # ---------------------------------------------------------------------------
 say "snapshots (nightly, on-box, 7 kept)"
-cat > /usr/local/bin/coord-snapshot <<'SNAP'
+cat > /usr/local/bin/knoot-snapshot <<'SNAP'
 #!/usr/bin/env bash
 # A consistent copy of a live SQLite database: `.backup` takes a read lock and
 # copies pages, which `cp` does not, and a half-copied WAL database restores as
 # a corrupt one.
 set -euo pipefail
-DB=/var/lib/coord/relay.db
-DIR=/var/lib/coord/snapshots
+DB=/var/lib/knoot/relay.db
+DIR=/var/lib/knoot/snapshots
 [[ -f $DB ]] || exit 0
 out="$DIR/relay-$(date -u +%Y%m%dT%H%M%SZ).db"
 sqlite3 "$DB" ".backup '$out'"
 gzip -f "$out"
 ls -1t "$DIR"/relay-*.db.gz 2>/dev/null | tail -n +8 | xargs -r rm --
 SNAP
-chmod 0755 /usr/local/bin/coord-snapshot
+chmod 0755 /usr/local/bin/knoot-snapshot
 
-cat > /etc/systemd/system/coord-snapshot.service <<'UNIT'
+cat > /etc/systemd/system/knoot-snapshot.service <<'UNIT'
 [Unit]
-Description=Snapshot the coord event log
+Description=Snapshot the knoot event log
 [Service]
 Type=oneshot
-User=coord
-Group=coord
-ExecStart=/usr/local/bin/coord-snapshot
+User=knoot
+Group=knoot
+ExecStart=/usr/local/bin/knoot-snapshot
 UNIT
 
-cat > /etc/systemd/system/coord-snapshot.timer <<'UNIT'
+cat > /etc/systemd/system/knoot-snapshot.timer <<'UNIT'
 [Unit]
-Description=Nightly coord event log snapshot
+Description=Nightly knoot event log snapshot
 [Timer]
 OnCalendar=daily
 RandomizedDelaySec=30m
@@ -166,18 +206,18 @@ if ! command -v litestream >/dev/null; then
 	rm -f /tmp/litestream.deb
 fi
 
-if [[ -s /etc/coord/litestream.env ]]; then
+if [[ -s /etc/knoot/litestream.env ]]; then
 	# shellcheck disable=SC1091
-	set -a; . /etc/coord/litestream.env; set +a
-	: "${LITESTREAM_BUCKET:?set LITESTREAM_BUCKET in /etc/coord/litestream.env}"
+	set -a; . /etc/knoot/litestream.env; set +a
+	: "${LITESTREAM_BUCKET:?set LITESTREAM_BUCKET in /etc/knoot/litestream.env}"
 	cat > /etc/litestream.yml <<YML
-# Generated by deploy/provision.sh — edit /etc/coord/litestream.env instead.
+# Generated by deploy/provision.sh — edit /etc/knoot/litestream.env instead.
 dbs:
-  - path: /var/lib/coord/relay.db
+  - path: /var/lib/knoot/relay.db
     replicas:
       - type: s3
         bucket: ${LITESTREAM_BUCKET}
-        path: ${LITESTREAM_PATH:-coord/relay.db}
+        path: ${LITESTREAM_PATH:-knoot/relay.db}
         endpoint: ${LITESTREAM_ENDPOINT:-}
         region: ${LITESTREAM_REGION:-us-east-1}
         # Ten seconds of loss on a total-loss event, and a full snapshot a day
@@ -190,50 +230,50 @@ YML
 	mkdir -p /etc/systemd/system/litestream.service.d
 	cat > /etc/systemd/system/litestream.service.d/override.conf <<'UNIT'
 [Service]
-EnvironmentFile=/etc/coord/litestream.env
+EnvironmentFile=/etc/knoot/litestream.env
 UNIT
 	# Restore before the relay starts, but only into an empty state directory:
 	# an existing database is the authority, and clobbering it with a replica
 	# would be the backup destroying the thing it protects.
-	if ! [[ -f /var/lib/coord/relay.db ]]; then
+	if ! [[ -f /var/lib/knoot/relay.db ]]; then
 		echo "   no local database — restoring from the replica"
-		litestream restore -if-replica-exists -o /var/lib/coord/relay.db /var/lib/coord/relay.db || true
-		chown coord:coord /var/lib/coord/relay.db 2>/dev/null || true
+		litestream restore -if-replica-exists -o /var/lib/knoot/relay.db /var/lib/knoot/relay.db || true
+		chown knoot:knoot /var/lib/knoot/relay.db 2>/dev/null || true
 	fi
 	systemctl daemon-reload
 	systemctl enable --quiet litestream
 	systemctl restart litestream
-	echo "   replicating to ${LITESTREAM_BUCKET}/${LITESTREAM_PATH:-coord/relay.db}"
+	echo "   replicating to ${LITESTREAM_BUCKET}/${LITESTREAM_PATH:-knoot/relay.db}"
 else
 	systemctl disable --quiet litestream 2>/dev/null || true
 	systemctl stop litestream 2>/dev/null || true
 	cat <<'OFF'
-   installed but OFF — no /etc/coord/litestream.env.
+   installed but OFF — no /etc/knoot/litestream.env.
    Nightly on-box snapshots still run; losing the droplet would still lose the log.
    To enable, create a DigitalOcean Space and write:
 
-     cat > /etc/coord/litestream.env <<'EOF'
+     cat > /etc/knoot/litestream.env <<'EOF'
      LITESTREAM_BUCKET=your-space-name
      LITESTREAM_ENDPOINT=https://fra1.digitaloceanspaces.com
      LITESTREAM_REGION=fra1
      LITESTREAM_ACCESS_KEY_ID=...
      LITESTREAM_SECRET_ACCESS_KEY=...
      EOF
-     chmod 600 /etc/coord/litestream.env
+     chmod 600 /etc/knoot/litestream.env
 
    then re-run this script.
 OFF
 fi
 
 say "systemd"
-install -m 0644 "$HERE/coord-relay.service" /etc/systemd/system/coord-relay.service
+install -m 0644 "$HERE/knoot-relay.service" /etc/systemd/system/knoot-relay.service
 systemctl daemon-reload
-systemctl enable --quiet coord-relay coord-snapshot.timer
+systemctl enable --quiet knoot-relay knoot-snapshot.timer
 # Swap the binary in only now that everything around it is in place, so a
 # failed download or a bad checksum leaves the running version untouched.
-mv /usr/local/bin/coord.new /usr/local/bin/coord
-systemctl restart coord-relay
-systemctl start coord-snapshot.timer
+mv /usr/local/bin/knoot.new /usr/local/bin/knoot
+systemctl restart knoot-relay
+systemctl start knoot-snapshot.timer
 
 say "caddy"
 # Order matters: the longer name is substituted first, or `relay.knoot.dev`
@@ -253,7 +293,7 @@ if command -v ufw >/dev/null; then
 fi
 
 say "checks"
-TOKEN="$(sed -n 's/^COORD_RELAY_TOKEN=//p' /etc/coord/relay.env)"
+TOKEN="$(sed -n 's/^KNOOT_RELAY_TOKEN=//p' /etc/knoot/relay.env)"
 sleep 1
 fail() { echo "[FAIL] $1"; exit 1; }
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:7420/api/repos")
@@ -269,12 +309,12 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:7420/api/registe
 
 # WAL is what makes the log replicable; without it litestream copies nothing
 # and reports success.
-mode=$(sqlite3 /var/lib/coord/relay.db "PRAGMA journal_mode;" 2>/dev/null || echo none)
+mode=$(sqlite3 /var/lib/knoot/relay.db "PRAGMA journal_mode;" 2>/dev/null || echo none)
 [[ $mode == wal ]] && echo "[ok  ] event log is in WAL mode (replicable)" \
 	|| echo "[warn] journal_mode is '$mode' — continuous replication would do nothing"
 
-sudo -u coord /usr/local/bin/coord-snapshot \
-	&& echo "[ok  ] snapshot taken ($(ls -1 /var/lib/coord/snapshots | wc -l | tr -d ' ') kept)" \
+sudo -u knoot /usr/local/bin/knoot-snapshot \
+	&& echo "[ok  ] snapshot taken ($(ls -1 /var/lib/knoot/snapshots | wc -l | tr -d ' ') kept)" \
 	|| echo "[warn] snapshot failed"
 
 if systemctl is-active --quiet litestream; then
@@ -295,11 +335,11 @@ relay is up.
 
   site:           https://$APEX
   console:        https://$APEX/app
-  enroll a repo:  coord init --relay wss://$DOMAIN/ws
-  each teammate:  coord login --relay wss://$DOMAIN/ws --token <team token from the console>
+  enroll a repo:  knoot init --relay wss://$DOMAIN/ws
+  each teammate:  knoot login --relay wss://$DOMAIN/ws --token <team token from the console>
 
   operator token: $TOKEN
-  logs:           journalctl -u coord-relay -f
-  snapshots:      /var/lib/coord/snapshots
+  logs:           journalctl -u knoot-relay -f
+  snapshots:      /var/lib/knoot/snapshots
   redeploy:       bash $HERE/provision.sh
 OUT

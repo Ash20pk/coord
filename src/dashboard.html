@@ -1,7 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>coord — live</title>
+<title>knoot — live</title>
 <style>
   :root{
     --bg:#0b0d10; --panel:#12161b; --line:#1e242c; --ink:#e6edf3; --dim:#7d8896;
@@ -67,7 +67,7 @@
 </style>
 
 <header>
-  <div class="brand"><span class="dot" id="dot"></span>coord</div>
+  <div class="brand"><span class="dot" id="dot"></span>knoot</div>
   <select id="repo"></select>
   <div class="stats">
     <div class="stat"><b id="s-sessions">0</b><span>sessions</span></div>
@@ -97,8 +97,8 @@
 const TOKEN = (() => {
   const q = new URLSearchParams(location.search).get('token');
   try {
-    if (q) { sessionStorage.setItem('coordToken', q); return q; }
-    return sessionStorage.getItem('coordToken') || '';
+    if (q) { sessionStorage.setItem('knootToken', q); return q; }
+    return sessionStorage.getItem('knootToken') || '';
   } catch (_) { return q || ''; }
 })();
 const withTok = (u) => TOKEN ? u + (u.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN) : u;
@@ -121,7 +121,7 @@ async function boot(){
   if (repo) sel.value = repo;
   sel.onchange = () => { repo = sel.value; resetView(); connect(); };
   if (repo) { await history(); connect(); }
-  else $('foot').textContent = 'no repos yet — run `coord init` in a repo and start a session';
+  else $('foot').textContent = 'no repos yet — run `knoot init` in a repo and start a session';
 }
 
 function resetView(){

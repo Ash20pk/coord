@@ -1,5 +1,5 @@
 //! Layer 4: contract test against Claude Code's hook interface. Drives the
-//! real `coord` binary with canned hook payloads and asserts on exact stdout.
+//! real `knoot` binary with canned hook payloads and asserts on exact stdout.
 //! This is the test most likely to catch upstream hook-format drift.
 //!
 //! Note: these run on a multi_thread runtime — `hook()` blocks on a child
@@ -7,25 +7,25 @@
 
 mod common;
 use common::*;
-use coord::proto::{DReq, DResp};
+use knoot::proto::{DReq, DResp};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const BIN: &str = env!("CARGO_BIN_EXE_coord");
+const BIN: &str = env!("CARGO_BIN_EXE_knoot");
 
-/// Run `coord hook` with a payload on stdin; returns parsed stdout (None if empty).
+/// Run `knoot hook` with a payload on stdin; returns parsed stdout (None if empty).
 fn hook(sock: &Path, payload: Value) -> Option<Value> {
     hook_as(sock, payload, None)
 }
 
-/// As `hook`, but labelling the session with COORD_USER.
-fn hook_as(sock: &Path, payload: Value, coord_user: Option<&str>) -> Option<Value> {
+/// As `hook`, but labelling the session with KNOOT_USER.
+fn hook_as(sock: &Path, payload: Value, knoot_user: Option<&str>) -> Option<Value> {
     let mut cmd = Command::new(BIN);
-    cmd.arg("hook").env("COORD_SOCK", sock).env("USER", "testuser");
-    if let Some(u) = coord_user {
-        cmd.env("COORD_USER", u);
+    cmd.arg("hook").env("KNOOT_SOCK", sock).env("USER", "testuser");
+    if let Some(u) = knoot_user {
+        cmd.env("KNOOT_USER", u);
     }
     run(cmd, payload)
 }
@@ -118,7 +118,7 @@ async fn conflicting_edit_emits_a_deny_decision_with_a_usable_brief() {
         reason.contains("refactor the auth session handling"),
         "brief must carry the holder's intent: {reason}"
     );
-    assert!(reason.contains("coord msg"), "brief must offer a way to coordinate: {reason}");
+    assert!(reason.contains("knoot msg"), "brief must offer a way to coordinate: {reason}");
     assert!(reason.contains("released"), "brief must promise a release notification: {reason}");
 }
 
@@ -253,7 +253,7 @@ async fn a_cross_branch_write_is_warned_about() {
 }
 
 /// Gap 1: a peer's write must reach the next turn on its own. A cheap model
-/// will not run `coord who`, so anything it needs to coordinate cannot sit
+/// will not run `knoot who`, so anything it needs to coordinate cannot sit
 /// behind a command it has to think of.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_turn_is_told_what_changed_under_it() {
@@ -333,10 +333,10 @@ async fn messages_arrive_at_the_start_of_a_turn() {
     let mut cmd = Command::new(BIN);
     cmd.args(["msg", "ash", "discount() returns a number, not an array"])
         .current_dir(&root)
-        .env("COORD_SOCK", &sock)
-        .env("COORD_USER", "priya")
+        .env("KNOOT_SOCK", &sock)
+        .env("KNOOT_USER", "priya")
         .env("USER", "testuser");
-    assert!(cmd.status().unwrap().success(), "coord msg must succeed");
+    assert!(cmd.status().unwrap().success(), "knoot msg must succeed");
 
     let out = hook_as(&sock, json!({
         "hook_event_name": "UserPromptSubmit", "session_id": "sessA",
@@ -523,7 +523,7 @@ async fn garbage_and_partial_payloads_never_break_the_agent() {
     // Outright invalid JSON on stdin.
     let mut child = Command::new(BIN)
         .arg("hook")
-        .env("COORD_SOCK", &sock)
+        .env("KNOOT_SOCK", &sock)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -594,7 +594,7 @@ async fn coord_user_labels_distinct_sessions_on_one_machine() {
         .expect("collision must be reported");
     let reason = out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
     assert!(reason.contains("ash"), "brief must name the holder's label: {reason}");
-    assert!(!reason.contains("testuser"), "COORD_USER must win over $USER: {reason}");
+    assert!(!reason.contains("testuser"), "KNOOT_USER must win over $USER: {reason}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1040,10 +1040,10 @@ async fn a_broadcast_reaches_every_peer_but_not_the_sender() {
 async fn a_session_idle_past_the_old_prune_window_keeps_its_identity() {
     // The run that exposed this had a 41-minute gap between startup and the
     // first prompt; every later claim was then attributed to the OS user.
-    let mut v = coord::proto::View::default();
-    v.apply(&coord::proto::Event::SessionStarted {
+    let mut v = knoot::proto::View::default();
+    v.apply(&knoot::proto::Event::SessionStarted {
         session: "s1".into(), user: "sam".into(), branch: "main".into(),
-        ts: coord::proto::now_ms() - 45 * 60 * 1000,
+        ts: knoot::proto::now_ms() - 45 * 60 * 1000,
     });
     v.prune();
     assert_eq!(

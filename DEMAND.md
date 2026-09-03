@@ -1,4 +1,4 @@
-# coord — is there demand for this?
+# knoot — is there demand for this?
 
 _2 September 2026. Companion to REPORT.md (what is true about the code) and
 GAPS.md (what would make it best). This one asks whether anyone wants it._
@@ -14,7 +14,7 @@ asymmetries, and the asymmetries here are large.
 
 ## The short version
 
-| What coord does | External demand | Where it stands |
+| What knoot does | External demand | Where it stands |
 |---|---|---|
 | Messaging and presence between sessions | **Strong** — 2,202 stars in five weeks | Absorbed by Anthropic |
 | File claims / locks (the core) | **None measurable** — 0 reactions, 0–7-star tools | Open because nobody wants it |
@@ -54,13 +54,13 @@ Teams' mailboxes and shared task list. Scope is precise — **your own
 sessions** — which leaves exactly one thing uncovered: sessions belonging to
 different people.
 
-**For coord:** gap 1's push mechanism was built on the right instinct and into a
+**For knoot:** gap 1's push mechanism was built on the right instinct and into a
 market that closed while it was being built. Do not compete on messaging.
 
-## 2. File claims: coord's core has no measurable demand
+## 2. File claims: knoot's core has no measurable demand
 
 - claude-peers issue **#72 — "Add repo-scoped work claims / leases for parallel
-  sessions."** Exactly coord's claims, requested in the most popular project in
+  sessions."** Exactly knoot's claims, requested in the most popular project in
   the space. **0 reactions, 0 comments.**
 - Every repository whose pitch is file locking for agents:
   `file-lock-coordinator` 0★, `crew` 0★ (183 commits — a well-built tool nobody
@@ -81,7 +81,7 @@ now.
 This matches our own runs. Five live runs, one collision, and that one was
 forced. Capable agents partition themselves; cheap ones never leave their lane.
 
-**For coord:** the lock is a safety net, not the product. The whole
+**For knoot:** the lock is a safety net, not the product. The whole
 "claims with leases, 400 races, one winner" story is engineering nobody asked
 for. Keep it because fail-open makes it free; stop pitching it.
 
@@ -96,11 +96,11 @@ for. Keep it because fail-open makes it free; stop pitching it.
   Conflicts only surface at feature completion."*
 
 One HN commenter, unprompted: *"set up a channel for agents to communicate and
-you shouldn't have issues with messy merges."* That is coord's thesis, said by
+you shouldn't have issues with messy merges."* That is knoot's thesis, said by
 a stranger.
 
-**For coord:** this is the one direction where the market agrees. `clash` does
-it for one machine's worktrees; coord does it across machines on a shared tree
+**For knoot:** this is the one direction where the market agrees. `clash` does
+it for one machine's worktrees; knoot does it across machines on a shared tree
 with live leases. Small niche, validated, occupied at the single-machine end.
 
 ## 4. Team coordination — the GTM wedge: nothing found
@@ -112,7 +112,7 @@ have not used this on a team… you'd end up with a giant PR that no one wants
 to review… that would probably be the end of the package at that workplace."*
 
 The one project explicitly aimed at cross-user coordination, `beadhub`
-(*"real time coord for coding agents across different minders"*), has **5
+(*"real time knoot for coding agents across different minders"*), has **5
 stars**. `scrubjay`, cross-machine sync, has 14.
 
 This does not prove the need is absent. It may be early: teams where several
@@ -162,7 +162,7 @@ Not a lock. Not chat. Both of those are either unwanted or first-party.
 - **Single-developer orchestration.** Crowded (a dozen worktree managers,
   `diri`, `ccswarm`), commoditized, and now first-party via Agent Teams.
 - **A general governance layer.** `bernstein` has a year and a thousand stars.
-  If receipts matter for coord, they are *team* receipts — who touched what
+  If receipts matter for knoot, they are *team* receipts — who touched what
   across people — which is the one slice bernstein's per-developer worktree
   model does not produce.
 
@@ -171,10 +171,10 @@ Not a lock. Not chat. Both of those are either unwanted or first-party.
 ## Revised sequence
 
 1. Five team interviews. One week. Write down the answers verbatim.
-2. If the collisions are real: fix the shipping blocker (`coord init` writes an
+2. If the collisions are real: fix the shipping blocker (`knoot init` writes an
    absolute path to the binary into the committed hook config), one hosted
    relay, one design-partner team, one week of unforced work, read the log.
-3. If they are not: the honest options are to shelve coord, or to reposition it
+3. If they are not: the honest options are to shelve knoot, or to reposition it
    around what the log can say about a team's agents — and that is a different
    product with a different first customer, to be decided then, not now.
 

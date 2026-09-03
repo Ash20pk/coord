@@ -174,7 +174,7 @@ pub struct SessionInfo {
 
 /// Two claim paths conflict if equal, or one is a directory prefix of the other.
 /// Whether two branch labels should be treated as the same branch. An unknown
-/// branch on either side compares equal: coord would rather block a write it
+/// branch on either side compares equal: knoot would rather block a write it
 /// could have allowed than allow one it should have blocked.
 pub fn same_branch(a: &str, b: &str) -> bool {
     a.is_empty() || b.is_empty() || a == b
@@ -428,7 +428,7 @@ pub enum DReq {
     /// A Bash command that finished: diff the working tree if it was audited.
     BashPost { repo_root: String, session: String },
     Who { repo_root: String },
-    /// Is this daemon actually talking to the relay? `coord status` cannot
+    /// Is this daemon actually talking to the relay? `knoot status` cannot
     /// answer that by inspecting config: a stored token proves nothing about
     /// whether the dial succeeded.
     Health { repo_root: String },

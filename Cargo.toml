@@ -1,5 +1,5 @@
 [package]
-name = "coord"
+name = "knoot"
 version = "0.1.0"
 edition = "2021"
 description = "Realtime coordination layer for coding agents — a sequenced event log with claims, leases, and conflict briefs."

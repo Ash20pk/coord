@@ -1,4 +1,4 @@
-use coord::{config, daemon, hook, proto, relay, watch};
+use knoot::{config, daemon, hook, proto, relay, watch};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "coord", version, about = "Realtime coordination for coding agents")]
+#[command(name = "knoot", version, about = "Realtime coordination for coding agents")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -36,7 +36,7 @@ enum Cmd {
     Daemon,
     /// Hook shim invoked by Claude Code (reads hook JSON on stdin)
     Hook,
-    /// Enable coord in the current repo: write .coord.toml and install hooks
+    /// Enable knoot in the current repo: write .knoot.toml and install hooks
     Init {
         #[arg(long, default_value = "ws://127.0.0.1:7420/ws")]
         relay: String,
@@ -44,8 +44,8 @@ enum Cmd {
         #[arg(long)]
         repo: Option<String>,
     },
-    /// Store the token for a relay (kept in ~/.coord/credentials.toml, not in
-    /// the repo — .coord.toml is committed and must never carry a secret)
+    /// Store the token for a relay (kept in ~/.knoot/credentials.toml, not in
+    /// the repo — .knoot.toml is committed and must never carry a secret)
     Login {
         #[arg(long)]
         relay: String,
@@ -68,7 +68,7 @@ enum Cmd {
     },
     /// Read and clear pending notifications for this user
     Inbox {
-        /// User name (defaults to $COORD_USER, else $USER)
+        /// User name (defaults to $KNOOT_USER, else $USER)
         #[arg(long)]
         user: Option<String>,
     },
@@ -78,7 +78,7 @@ enum Cmd {
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Relay { listen, db, lab_dir, agents, agent_program } => {
-            let db = db.unwrap_or_else(|| dirs::home_dir().unwrap().join(".coord/relay.db"));
+            let db = db.unwrap_or_else(|| dirs::home_dir().unwrap().join(".knoot/relay.db"));
             let lab = lab_dir.map(|dir| relay::LabOpts { dir, agents, program: agent_program });
             relay::run(listen, db, lab).await
         }
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
         Cmd::Inbox { user } => inbox(user),
         Cmd::Watch => {
             let root = config::find_repo_root(&std::env::current_dir()?)
-                .context("no .coord.toml found — run `coord init` first")?;
+                .context("no .knoot.toml found — run `knoot init` first")?;
             watch::run(root).await
         }
     }
@@ -138,15 +138,15 @@ fn derive_repo_id(root: &std::path::Path) -> String {
 /// Whether a settings.json hook command is one of ours. Matches the absolute
 /// paths written by older versions as well as the PATH form, so re-running
 /// `init` repairs a committed config instead of appending a second entry.
-fn is_coord_hook(cmd: &str) -> bool {
+fn is_knoot_hook(cmd: &str) -> bool {
     let cmd = cmd.trim();
     if !cmd.ends_with(" hook") {
         return false;
     }
     let prog = cmd.trim_end_matches(" hook");
-    prog == "coord"
-        || prog == "${COORD_BIN:-coord}"
-        || prog.rsplit('/').next() == Some("coord")
+    prog == "knoot"
+        || prog == "${KNOOT_BIN:-knoot}"
+        || prog.rsplit('/').next() == Some("knoot")
 }
 
 fn init(relay: String, repo: Option<String>) -> Result<()> {
@@ -159,12 +159,12 @@ fn init(relay: String, repo: Option<String>) -> Result<()> {
     // The command must resolve on *every* teammate's machine, because this
     // file is committed — that is the whole onboarding story. Writing
     // `current_exe()` here bakes in the path of whoever ran `init`
-    // (`/Users/someone/coord/target/release/coord`), which does not exist for
-    // anyone else: their hooks fail, coord fails open, and it silently does
+    // (`/Users/someone/knoot/target/release/knoot`), which does not exist for
+    // anyone else: their hooks fail, knoot fails open, and it silently does
     // nothing for the whole team while looking fine to the person who set it
-    // up. So: resolve `coord` from PATH, with COORD_BIN as the escape hatch
+    // up. So: resolve `knoot` from PATH, with KNOOT_BIN as the escape hatch
     // for anyone who keeps it somewhere unusual.
-    let hook_cmd = "${COORD_BIN:-coord} hook".to_string();
+    let hook_cmd = "${KNOOT_BIN:-knoot} hook".to_string();
     let settings_path = root.join(".claude/settings.json");
     std::fs::create_dir_all(settings_path.parent().unwrap())?;
     let mut settings: Value = std::fs::read_to_string(&settings_path)
@@ -193,12 +193,12 @@ fn init(relay: String, repo: Option<String>) -> Result<()> {
             .entry(*event)
             .or_insert_with(|| json!([]));
         let arr = arr.as_array_mut().context("hook entry not an array")?;
-        // Drop any previous coord entry rather than skipping: an older install
+        // Drop any previous knoot entry rather than skipping: an older install
         // has an outdated matcher and would silently keep its narrower scope.
         arr.retain(|g| {
             !g["hooks"]
                 .as_array()
-                .map(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(is_coord_hook)))
+                .map(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(is_knoot_hook)))
                 .unwrap_or(false)
         });
         let mut group = json!({ "hooks": [{ "type": "command", "command": hook_cmd }] });
@@ -209,38 +209,37 @@ fn init(relay: String, repo: Option<String>) -> Result<()> {
     }
     std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
 
-    println!("coord enabled for {}", root.display());
+    println!("knoot enabled for {}", root.display());
     println!("  repo id : {repo_id}");
     println!("  relay   : {relay}");
     println!("  hooks   : {}", settings_path.display());
     // Say it here rather than letting someone discover it from silence.
-    if which_coord().is_none() {
+    if which_knoot().is_none() {
         println!(
-            "\nwarning: `coord` is not on PATH. The hooks just written call it by name so they \
+            "\nwarning: `knoot` is not on PATH. The hooks just written call it by name so they \
              work for everyone who clones this repo — install the binary on PATH, or set \
-             COORD_BIN to its location."
+             KNOOT_BIN to its location."
         );
     }
     println!("\nNext steps:");
-    println!("  1. start a relay somewhere shared:   coord relay --listen 0.0.0.0:7420");
-    println!("  2. start the local daemon:           coord daemon");
+    println!("  1. start a relay somewhere shared:   knoot relay --listen 0.0.0.0:7420");
+    println!("  2. start the local daemon:           knoot daemon");
     println!("  3. restart Claude Code sessions in this repo — they now coordinate.");
-    println!("  4. commit .coord.toml and .claude/settings.json — teammates who clone are enrolled.");
-    println!("     Each of them needs the binary on PATH, `coord daemon`, and, on a hosted");
-    println!("     relay, `coord login`.");
+    println!("  4. commit .knoot.toml and .claude/settings.json — teammates who clone are enrolled.");
+    println!("     Each of them needs the binary on PATH, `knoot daemon`, and, on a hosted");
+    println!("     relay, `knoot login`.");
     Ok(())
 }
 
 fn repo_root_or_bail() -> Result<PathBuf> {
     config::find_repo_root(&std::env::current_dir()?)
-        .context("no .coord.toml found — run `coord init` first")
+        .context("no .knoot.toml found — run `knoot init` first")
 }
 
 /// Who this CLI invocation speaks for. Mirrors the hook's rule so a message
 /// and a notification agree on identity.
 fn cli_user() -> String {
-    std::env::var("COORD_USER")
-        .ok()
+    config::env_or_legacy("KNOOT_USER")
         .filter(|s| !s.trim().is_empty())
         .or_else(|| std::env::var("USER").ok())
         .unwrap_or_else(|| "unknown".into())
@@ -248,7 +247,7 @@ fn cli_user() -> String {
 
 fn msg(to: String, text: String) -> Result<()> {
     if text.trim().is_empty() {
-        anyhow::bail!("nothing to send: coord msg <user|all> \"your message\"");
+        anyhow::bail!("nothing to send: knoot msg <user|all> \"your message\"");
     }
     let root = repo_root_or_bail()?;
     let to = if to.eq_ignore_ascii_case("all") { None } else { Some(to) };
@@ -264,7 +263,7 @@ fn msg(to: String, text: String) -> Result<()> {
             println!("sent to {}", to.unwrap_or_else(|| "everyone".into()));
             Ok(())
         }
-        None => anyhow::bail!("coordd not running — start it with `coord daemon`"),
+        None => anyhow::bail!("knootd not running — start it with `knoot daemon`"),
     }
 }
 
@@ -286,7 +285,7 @@ fn inbox(user: Option<String>) -> Result<()> {
             Ok(())
         }
         Some(DResp::Err { msg }) => anyhow::bail!(msg),
-        _ => anyhow::bail!("coordd not running — start it with `coord daemon`"),
+        _ => anyhow::bail!("knootd not running — start it with `knoot daemon`"),
     }
 }
 
@@ -305,22 +304,22 @@ fn login(relay: String, token: String) -> Result<()> {
     Ok(())
 }
 
-/// Where `coord` resolves from, if anywhere. `init` writes hooks that call it
+/// Where `knoot` resolves from, if anywhere. `init` writes hooks that call it
 /// by name, so "is it on PATH" is a real question with a real failure mode.
-fn which_coord() -> Option<PathBuf> {
-    if let Ok(explicit) = std::env::var("COORD_BIN") {
+fn which_knoot() -> Option<PathBuf> {
+    if let Some(explicit) = config::env_or_legacy("KNOOT_BIN") {
         let p = PathBuf::from(explicit);
         return p.is_file().then_some(p);
     }
     std::env::var("PATH").ok()?.split(':').find_map(|dir| {
-        let p = std::path::Path::new(dir).join("coord");
+        let p = std::path::Path::new(dir).join("knoot");
         p.is_file().then_some(p)
     })
 }
 
-/// Every way coord can be silently off, in one place.
+/// Every way knoot can be silently off, in one place.
 ///
-/// Fail-open means a broken coord looks exactly like a working one from
+/// Fail-open means a broken knoot looks exactly like a working one from
 /// inside an agent: no errors, no blocks, nothing. That is the right
 /// behaviour and it is also why this command has to exist — it is the only
 /// way for a human to tell "nothing collided" from "nothing was watching".
@@ -329,17 +328,17 @@ fn status() -> Result<()> {
     let ok = |b: bool| if b { "ok  " } else { "FAIL" };
 
     // 1. the binary the committed hooks call by name
-    let on_path = which_coord();
+    let on_path = which_knoot();
     println!(
         "[{}] binary    {}",
         ok(on_path.is_some()),
         match &on_path {
             Some(p) => p.display().to_string(),
-            None => "`coord` not found on PATH (set COORD_BIN, or install it there)".into(),
+            None => "`knoot` not found on PATH (set KNOOT_BIN, or install it there)".into(),
         }
     );
     if on_path.is_none() {
-        problems.push("install coord on PATH, or set COORD_BIN".into());
+        problems.push("install knoot on PATH, or set KNOOT_BIN".into());
     }
 
     // 2. this repo
@@ -348,10 +347,24 @@ fn status() -> Result<()> {
     match (&root, &cfg) {
         (Some(r), Some(c)) => {
             println!("[ok  ] repo      {} (id: {})", r.display(), c.repo);
+            // Still working, but on a name that is no longer written. Say so
+            // once rather than leaving it to be discovered.
+            if config::RepoConfig::is_legacy(r) {
+                println!(
+                    "[WARN] repo      enrolled as {} (the old name) — still read, no longer written",
+                    config::LEGACY_CONFIG_FILE
+                );
+                problems.push(format!(
+                    "migrate this repo: git mv {} {} && knoot init --relay {}",
+                    config::LEGACY_CONFIG_FILE,
+                    config::CONFIG_FILE,
+                    c.relay
+                ));
+            }
         }
         _ => {
-            println!("[FAIL] repo      no .coord.toml here — run `coord init`");
-            problems.push("run `coord init` in this repo".into());
+            println!("[FAIL] repo      no .knoot.toml here — run `knoot init`");
+            problems.push("run `knoot init` in this repo".into());
         }
     }
 
@@ -369,7 +382,7 @@ fn status() -> Result<()> {
             .filter_map(|g| g["hooks"].as_array())
             .flatten()
             .filter_map(|h| h["command"].as_str())
-            .filter(|c| is_coord_hook(c))
+            .filter(|c| is_knoot_hook(c))
             .map(str::to_string)
             .collect();
         let events = cmds.len();
@@ -377,13 +390,13 @@ fn status() -> Result<()> {
         // resolves for whoever ran `init` and for nobody else.
         let absolute: Vec<&String> = cmds.iter().filter(|c| c.starts_with('/')).collect();
         if events == 0 {
-            println!("[FAIL] hooks     not installed — run `coord init`");
-            problems.push("run `coord init` to install hooks".into());
+            println!("[FAIL] hooks     not installed — run `knoot init`");
+            problems.push("run `knoot init` to install hooks".into());
         } else if let Some(a) = absolute.first() {
             println!("[WARN] hooks     {events} events, but hardcoded to a local path:");
             println!("                 {a}");
             println!("                 that path will not exist for teammates who clone this repo");
-            problems.push("re-run `coord init` to write a PATH-resolved hook command".into());
+            problems.push("re-run `knoot init` to write a PATH-resolved hook command".into());
         } else {
             println!("[ok  ] hooks     {events} events, resolved from PATH");
         }
@@ -394,9 +407,9 @@ fn status() -> Result<()> {
         && root.as_ref().is_some_and(|r| {
             hook::call_daemon(&DReq::Who { repo_root: r.to_string_lossy().to_string() }).is_some()
         });
-    println!("[{}] daemon    {}", ok(daemon), if daemon { "responding" } else { "not running — start it with `coord daemon`" });
+    println!("[{}] daemon    {}", ok(daemon), if daemon { "responding" } else { "not running — start it with `knoot daemon`" });
     if !daemon {
-        problems.push("start the daemon: coord daemon".into());
+        problems.push("start the daemon: knoot daemon".into());
     }
 
     // 5. the relay: asked, not inferred. A stored token says nothing about
@@ -429,7 +442,7 @@ fn status() -> Result<()> {
                     println!("                 last error: {}", truncate_err(e));
                     if e.contains("401") {
                         problems.push(format!(
-                            "the relay rejected this token: coord login --relay {} --token <token>",
+                            "the relay rejected this token: knoot login --relay {} --token <token>",
                             c.relay
                         ));
                     } else {
@@ -445,7 +458,7 @@ fn status() -> Result<()> {
             }
         }
         if !have_token && !origin.contains("127.0.0.1") && !origin.contains("localhost") {
-            problems.push(format!("if that relay requires auth: coord login --relay {} --token <token>", c.relay));
+            problems.push(format!("if that relay requires auth: knoot login --relay {} --token <token>", c.relay));
         }
     }
 
@@ -453,7 +466,7 @@ fn status() -> Result<()> {
     if problems.is_empty() {
         println!("coordination is on.");
     } else {
-        println!("coordination is OFF or partial. Edits are still allowed — coord fails open —");
+        println!("coordination is OFF or partial. Edits are still allowed — knoot fails open —");
         println!("but nothing is being coordinated. To fix:");
         for p in &problems {
             println!("  - {p}");
@@ -475,9 +488,9 @@ fn truncate_err(e: &str) -> String {
 
 fn who() -> Result<()> {
     let root = config::find_repo_root(&std::env::current_dir()?)
-        .context("no .coord.toml found — run `coord init` first")?;
+        .context("no .knoot.toml found — run `knoot init` first")?;
     let req = DReq::Who { repo_root: root.to_string_lossy().to_string() };
-    let resp = hook::call_daemon(&req).context("coordd not running — start it with `coord daemon`")?;
+    let resp = hook::call_daemon(&req).context("knootd not running — start it with `knoot daemon`")?;
     match resp {
         DResp::Peers { sessions, claims, writes, .. } => {
             if sessions.is_empty() {
@@ -513,29 +526,29 @@ mod init_tests {
 
     /// The bug this guards: `init` used to write `current_exe()`, so the
     /// committed hook config named a path inside whoever ran it. Every
-    /// teammate's hooks then failed, coord failed open, and coordination was
+    /// teammate's hooks then failed, knoot failed open, and coordination was
     /// silently off for the whole team while looking healthy to one person.
     #[test]
     fn a_hook_command_must_not_be_machine_specific() {
-        assert!(!"${COORD_BIN:-coord} hook".contains('/'), "no absolute path may be baked in");
+        assert!(!"${KNOOT_BIN:-knoot} hook".contains('/'), "no absolute path may be baked in");
     }
 
     #[test]
     fn our_own_hooks_are_recognised_in_every_form_we_have_shipped() {
-        assert!(is_coord_hook("${COORD_BIN:-coord} hook"), "current form");
-        assert!(is_coord_hook("coord hook"), "bare PATH form");
-        assert!(is_coord_hook("/Users/someone/coord/target/release/coord hook"), "legacy absolute");
-        assert!(is_coord_hook("  coord hook  "), "surrounding whitespace");
+        assert!(is_knoot_hook("${KNOOT_BIN:-knoot} hook"), "current form");
+        assert!(is_knoot_hook("knoot hook"), "bare PATH form");
+        assert!(is_knoot_hook("/Users/someone/knoot/target/release/knoot hook"), "legacy absolute");
+        assert!(is_knoot_hook("  knoot hook  "), "surrounding whitespace");
     }
 
     /// Re-running `init` must repair a stale install, not append a second
     /// entry, and must never eat somebody else's hook.
     #[test]
     fn other_peoples_hooks_are_left_alone() {
-        assert!(!is_coord_hook("prettier --write"));
-        assert!(!is_coord_hook("my-linter hook"));
-        assert!(!is_coord_hook("coordinator hook"), "suffix match must respect the whole name");
-        assert!(!is_coord_hook("coord who"), "only the hook subcommand is ours");
-        assert!(!is_coord_hook("/opt/tools/coordinate hook"));
+        assert!(!is_knoot_hook("prettier --write"));
+        assert!(!is_knoot_hook("my-linter hook"));
+        assert!(!is_knoot_hook("coordinator hook"), "suffix match must respect the whole name");
+        assert!(!is_knoot_hook("knoot who"), "only the hook subcommand is ours");
+        assert!(!is_knoot_hook("/opt/tools/coordinate hook"));
     }
 }

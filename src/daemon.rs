@@ -14,11 +14,11 @@ const CLAIM_TIMEOUT_MS: u64 = 500; // relay slower than this → fail open
 const COLD_START_WAIT_MS: u64 = 400; // first-connection snapshot wait, then fail open
 
 pub fn socket_path() -> PathBuf {
-    // COORD_SOCK lets tests (and multi-instance setups) use an isolated socket.
-    if let Ok(p) = std::env::var("COORD_SOCK") {
+    // KNOOT_SOCK lets tests (and multi-instance setups) use an isolated socket.
+    if let Some(p) = crate::config::env_or_legacy("KNOOT_SOCK") {
         return PathBuf::from(p);
     }
-    dirs::home_dir().unwrap().join(".coord").join("coordd.sock")
+    dirs::home_dir().unwrap().join(".knoot").join("knootd.sock")
 }
 
 struct RepoConn {
@@ -31,7 +31,7 @@ struct RepoConn {
     stop_holds: Arc<Mutex<HashMap<String, u32>>>,
     view: Arc<Mutex<View>>,
     connected: Arc<Mutex<bool>>,
-    /// Why the last dial failed, kept so `coord status` can say which kind of
+    /// Why the last dial failed, kept so `knoot status` can say which kind of
     /// off this is rather than only that it is off.
     last_error: Arc<Mutex<Option<String>>>,
     /// True once a Welcome snapshot has been applied, i.e. the mirror is
@@ -73,7 +73,7 @@ pub async fn run_on(sock: PathBuf) -> Result<()> {
     std::fs::create_dir_all(sock.parent().unwrap())?;
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock)?;
-    eprintln!("coordd listening on {}", sock.display());
+    eprintln!("knootd listening on {}", sock.display());
 
     let daemon = Arc::new(Daemon::default());
     loop {
@@ -104,7 +104,7 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
     match req {
         DReq::PreWrite { repo_root, session, path } => {
             let Some(rc) = ensure_repo(d, &repo_root).await else {
-                return DResp::Decision { allow: true, reason: None }; // not coord-enabled → fail open
+                return DResp::Decision { allow: true, reason: None }; // not knoot-enabled → fail open
             };
             ensure_session(&rc, &session, &whoami());
             let path = rel_path(&repo_root, &path);
@@ -259,7 +259,7 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             // Answer with everything the agent would otherwise have to ask
             // for: peers now (presence injected once at SessionStart goes
             // stale within minutes), what moved under it since its last turn,
-            // and any mail. A cheap model will not run `coord who` or read its
+            // and any mail. A cheap model will not run `knoot who` or read its
             // messages; it does not have to.
             let key = (repo_root.clone(), session.clone());
             let now = now_ms();
@@ -410,7 +410,7 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
         }
         DReq::Msg { repo_root, from_user, to, text } => {
             let Some(rc) = ensure_repo(d, &repo_root).await else {
-                return DResp::Err { msg: "repo not coord-enabled".into() };
+                return DResp::Err { msg: "repo not knoot-enabled".into() };
             };
             let from_session = {
                 let v = rc.view.lock().unwrap();
@@ -459,7 +459,7 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
         }
         DReq::Health { repo_root } => {
             let Some(rc) = ensure_repo(d, &repo_root).await else {
-                return DResp::Err { msg: "repo not coord-enabled (run `coord init`)".into() };
+                return DResp::Err { msg: "repo not knoot-enabled (run `knoot init`)".into() };
             };
             let connected = *rc.connected.lock().unwrap();
             let ready = *rc.ready.lock().unwrap();
@@ -468,7 +468,7 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
         }
         DReq::Who { repo_root } => {
             let Some(rc) = ensure_repo(d, &repo_root).await else {
-                return DResp::Err { msg: "repo not coord-enabled (run `coord init`)".into() };
+                return DResp::Err { msg: "repo not knoot-enabled (run `knoot init`)".into() };
             };
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             let mut v = rc.view.lock().unwrap();
@@ -504,7 +504,7 @@ fn deliver(rc: &Arc<RepoConn>, ev: &Event) {
                     (
                         key,
                         format!(
-                            "coord: `{path}` is free now — {by_user} released it.{why} \
+                            "knoot: `{path}` is free now — {by_user} released it.{why} \
                              You were blocked on this file; you can proceed with it."
                         ),
                     )
@@ -512,7 +512,7 @@ fn deliver(rc: &Arc<RepoConn>, ev: &Event) {
                 .collect(),
             Event::Message { from_user, to, text, .. } => {
                 let scope = if to.is_some() { "" } else { " (to everyone)" };
-                let note = format!("coord: message from {from_user}{scope}: {text}");
+                let note = format!("knoot: message from {from_user}{scope}: {text}");
                 match to {
                     // Addressed: deliver even if that user has no live session
                     // yet, so the note is waiting when they arrive.
@@ -624,9 +624,9 @@ fn cross_branch_note(peers: &[Claim], path: &str) -> Option<String> {
         .map(|p| format!("{} on branch {}", p.user, if p.branch.is_empty() { "?" } else { &p.branch }))
         .collect();
     Some(format!(
-        "coord: {} is also editing {} right now. Nothing is blocked — you are on different \
+        "knoot: {} is also editing {} right now. Nothing is blocked — you are on different \
          branches — but these edits will meet at merge. Keep your change tight and scoped, and \
-         consider `coord msg` to agree who owns which part.",
+         consider `knoot msg` to agree who owns which part.",
         who.join(" and "),
         path
     ))
@@ -749,7 +749,7 @@ fn changed_paths(before: &str, after: &str) -> Vec<String> {
             let p = rest.rsplit(" -> ").next().unwrap_or(rest);
             Some(p.trim_matches('"').to_string())
         })
-        .filter(|p| !p.is_empty() && !p.starts_with(".coord") && !p.starts_with(".claude"))
+        .filter(|p| !p.is_empty() && !p.starts_with(".knoot") && !p.starts_with(".claude"))
         .collect();
     out.sort();
     out.dedup();
@@ -776,9 +776,9 @@ fn deny(path: &str, c: &Claim) -> DResp {
     DResp::Decision {
         allow: false,
         reason: Some(format!(
-            "coord: `{path}` is currently claimed by {} (session {}…) — intent: {}. Lease expires in ~{}m. \
+            "knoot: `{path}` is currently claimed by {} (session {}…) — intent: {}. Lease expires in ~{}m. \
              Do not edit this file now: work on something else, or wait — you will be told automatically when it is released. \
-             To coordinate directly, run: coord msg {} \"your question\". `coord who` lists all active sessions.",
+             To coordinate directly, run: knoot msg {} \"your question\". `knoot who` lists all active sessions.",
             c.user,
             &c.session[..c.session.len().min(8)],
             intent,
@@ -907,9 +907,9 @@ async fn relay_loop(cfg: RepoConfig, rc: Arc<RepoConn>, mut rx: mpsc::UnboundedR
                 *rc.last_error.lock().unwrap() = Some(msg.clone());
                 if !announced_auth_failure && msg.contains("401") {
                     eprintln!(
-                        "coord: relay {} rejected this daemon's token. Coordination is OFF \
+                        "knoot: relay {} rejected this daemon's token. Coordination is OFF \
                          (edits are allowed, as always when the relay is unavailable). Fix with: \
-                         coord login --relay {} --token <token>",
+                         knoot login --relay {} --token <token>",
                         cfg.relay, cfg.relay
                     );
                     announced_auth_failure = true;

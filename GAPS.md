@@ -1,4 +1,4 @@
-# coord — the gap between what it is and the best product in its category
+# knoot — the gap between what it is and the best product in its category
 
 _2 September 2026. Companion to REPORT.md, which says what is true; this says
 what should be._
@@ -19,7 +19,7 @@ isolating. Every gap below is measured against that.
 
 ## The thesis, in one line
 
-Everyone else is building fences between agents. coord is a room they can work
+Everyone else is building fences between agents. knoot is a room they can work
 in together, and the evidence says the room produces better code. Make the room
 impossible to get hurt in, make everything in it visible without asking, and
 tell people about conflicts before git does.
@@ -30,11 +30,11 @@ tell people about conflicts before git does.
 
 ### 1. Coordination is offered, not pushed
 
-**Today.** `coord who` and `coord msg` are commands an agent may or may not run.
+**Today.** `knoot who` and `knoot msg` are commands an agent may or may not run.
 Peer intents are injected every prompt; nothing else is.
 
 **Evidence.** Four Haiku agents, given `GOAL.md` and later a prompt that told
-them outright to run `coord who` before writing: zero invocations, zero
+them outright to run `knoot who` before writing: zero invocations, zero
 messages, two of four ended with the ownership map wrong. The same model, denied
 a file on express, read the holder and remaining lease off the conflict brief
 and behaved correctly on the first try. Pushed context works on the weakest
@@ -42,8 +42,8 @@ model; offered context is ignored by it.
 
 **Best.** Zero commands an agent must know. Every turn's context already carries
 who is here, what each peer has touched since this agent's last turn, what was
-said to it or to `all`, and what it is about to collide with. `coord who` and
-`coord msg` remain for power users; the default agent never types either and
+said to it or to `all`, and what it is about to collide with. `knoot who` and
+`knoot msg` remain for power users; the default agent never types either and
 coordinates anyway. Everything needed is already in `View`; the injection path
 is `hook.rs` `UserPromptSubmit`.
 
@@ -83,12 +83,12 @@ terms.
 **Best.** `ungated_write = 0` is a published guarantee, not a metric. Interpreter
 writes are gated the way shell writes are. The sentence that lets a team turn
 off worktrees is: *no agent has ever silently overwritten another's work under
-coord.* Every live run so far supports it; make it a promise and instrument it.
+knoot.* Every live run so far supports it; make it a promise and instrument it.
 
 ### 4. Only Claude Code sessions are visible
 
 **Today.** Hooks fire inside Claude Code. A teammate in VS Code, or their agent
-under Cursor, does not exist to coord.
+under Cursor, does not exist to knoot.
 
 **Why it matters.** Real teams are mixed, and the coordination pain remote teams
 feel is mostly *human* — who is in what. Whoever owns the shared view owns the
@@ -105,7 +105,7 @@ human, side by side. Start with the watcher; it is small.
 Nothing answers a question about the past.
 
 **Best.** A flight recorder for agent work. *"Why is `response.js` like this?"*
-→ `coord why lib/response.js`: sam claimed it with intent X, priya was denied,
+→ `knoot why lib/response.js`: sam claimed it with intent X, priya was denied,
 they exchanged two messages, sam wrote it, the suite went green. Every team
 with more than one agent will need this and none has it. Also the substrate for
 everything enterprise wants later — visibility, policy, spend attribution — so
@@ -116,22 +116,22 @@ nothing built here is wasted.
 **Today.** Eight tests hold the line; the README mentions it partway down.
 
 **Why it matters.** Every tool in this space eventually gets switched off
-because it got in the way once. coord has proof that it cannot.
+because it got in the way once. knoot has proof that it cannot.
 
-**Best.** First line of the README: *if coord is broken, your agents do not
+**Best.** First line of the README: *if knoot is broken, your agents do not
 know.* The distinction from every alternative, stated where people decide.
 
 ### 7. Not deployable by a team yet — CLOSED
 
 **Was.** Relay on `127.0.0.1`, no auth, no TLS.
 
-**Now.** `COORD_RELAY_TOKEN` makes the relay require a bearer token on the
+**Now.** `KNOOT_RELAY_TOKEN` makes the relay require a bearer token on the
 websocket, the data APIs and the lab terminals (a terminal is a shell on the
 host, so it is gated hardest); browsers pass `?token=` because they cannot set
-headers on a WebSocket. `coord login --relay <url> --token <t>` stores it in
-`~/.coord/credentials.toml` at 0600, keyed by relay origin so one login serves
+headers on a WebSocket. `knoot login --relay <url> --token <t>` stores it in
+`~/.knoot/credentials.toml` at 0600, keyed by relay origin so one login serves
 every repo on that relay — and deliberately **not** in the committed
-`.coord.toml`. `COORD_TOKEN` overrides for CI. The client speaks `wss://`.
+`.knoot.toml`. `KNOOT_TOKEN` overrides for CI. The client speaks `wss://`.
 Startup prints whether auth is on, and says so loudly when an open relay is
 bound off-loopback. A rejected token fails open, with one line on stderr
 naming the fix: an operator's mistake cannot become the team's outage.
@@ -142,7 +142,7 @@ anywhere yet.
 
 **Best.** Hosted relay, bearer token per team, TLS. No product thinking; an
 afternoon. Repo identity is already derived from the `origin` URL, so two
-clones on two machines land on the same stream, and `coord init` writes hooks
+clones on two machines land on the same stream, and `knoot init` writes hooks
 into a committable `.claude/settings.json`, so one person runs init, pushes,
 and the whole team is enrolled. Lean on both — that is the onboarding story.
 
@@ -167,7 +167,7 @@ is the current one.
 - **Fleet mode / merge queues.** That is building the competitor's product
   inside this one. If sharing works, isolation is the fallback, not the roadmap.
 - **A model in the arbiter.** The 4.1 ms, the determinism and the replayable log
-  *are* the product. Intelligence stays in the agents; coord stays the honest
+  *are* the product. Intelligence stays in the agents; knoot stays the honest
   referee.
 - **Enterprise features before one team has used it for a week.** Governance is
   a query over the log. It will be there when the buyer is.

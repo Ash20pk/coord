@@ -122,14 +122,14 @@ fn inner() {
         ("SessionStart", DResp::Peers { sessions, claims, writes, mail })
         | ("UserPromptSubmit", DResp::Peers { sessions, claims, writes, mail }) => {
             // Everything here arrives unasked. A capable model will run
-            // `coord who` and read its messages; a cheap one demonstrably
+            // `knoot who` and read its messages; a cheap one demonstrably
             // will not, even when told to — so nothing an agent needs to
             // coordinate may sit behind a command it has to think of.
             let mut ctx = String::new();
 
             // Mail first: it is the only part addressed to this agent.
             if !mail.is_empty() {
-                ctx.push_str("coord: messages for you\n");
+                ctx.push_str("knoot: messages for you\n");
                 for m in &mail {
                     ctx.push_str(&format!("- {m}\n"));
                 }
@@ -137,7 +137,7 @@ fn inner() {
             }
 
             if !writes.is_empty() {
-                ctx.push_str("coord: changed under you since your last turn\n");
+                ctx.push_str("knoot: changed under you since your last turn\n");
                 for w in &writes {
                     ctx.push_str(&format!("- {} wrote {}\n", w.user, w.path));
                 }
@@ -148,7 +148,7 @@ fn inner() {
 
             if !sessions.is_empty() {
                 ctx.push_str(&format!(
-                    "coord: {} other active session(s) on this repo right now:\n",
+                    "knoot: {} other active session(s) on this repo right now:\n",
                     sessions.len()
                 ));
                 let mine = git_branch(&cwd);
@@ -198,7 +198,7 @@ fn inner() {
             // short: the rest of this context arrived on its own.
             ctx.push_str(
                 "To reply or to tell peers you have finished something they are waiting on: \
-                 coord msg <user|all> \"text\"",
+                 knoot msg <user|all> \"text\"",
             );
 
             let out = json!({
@@ -222,12 +222,11 @@ fn file_path_of(v: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Who this session belongs to. COORD_USER lets several sessions on one
+/// Who this session belongs to. KNOOT_USER lets several sessions on one
 /// machine carry distinct identities (useful for testing, demos, and shared
 /// boxes); otherwise fall back to the OS user.
 fn session_user() -> String {
-    std::env::var("COORD_USER")
-        .ok()
+    crate::config::env_or_legacy("KNOOT_USER")
         .filter(|s| !s.trim().is_empty())
         .or_else(|| std::env::var("USER").ok())
         .unwrap_or_else(|| "unknown".into())

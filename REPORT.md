@@ -1,4 +1,4 @@
-# coord — state of the project
+# knoot — state of the project
 
 _As of 2 September 2026. Ten commits, `2b4dd0e`..`346ab0f`._
 
@@ -20,14 +20,14 @@ Roughly 3,400 lines of Rust plus two web pages. 84 tests, all passing, ~2.5s.
 | After-the-fact detection | Working-tree diff around opaque commands | Live: `python3 -c` write recorded as ungated |
 | Presence | Peer intents injected every prompt | Live: a session deferred without ever being blocked |
 | Release notification | `Stop` hook wakes a blocked session | Live against the running daemon |
-| Direct messages | `coord msg <user\|all>`, delivered via hooks | Live: 16–28 messages per four-agent run |
+| Direct messages | `knoot msg <user\|all>`, delivered via hooks | Live: 16–28 messages per four-agent run |
 | Audit trail | Every event in SQLite | Every run in this report came out of it |
-| Terminal dashboard | `coord watch` | — |
+| Terminal dashboard | `knoot watch` | — |
 | Browser dashboard | Relay serves `/` | — |
 | Browser lab | Relay hosts PTYs, xterm.js at `/lab` | Drove four real sessions through it |
 
 **Fail-open everywhere.** Relay down, daemon dead, relay hung, malformed input,
-non-coord repo → the edit is allowed. coord can never be the reason an agent
+non-knoot repo → the edit is allowed. knoot can never be the reason an agent
 cannot work. Eight tests hold this line.
 
 ---
@@ -35,7 +35,7 @@ cannot work. Eight tests hold this line.
 ## Architecture
 
 ```
-agents ──hooks──► coord hook ──unix socket──► coordd ──websocket──► coord relay
+agents ──hooks──► knoot hook ──unix socket──► knootd ──websocket──► knoot relay
 (any terminal)      (shim)                  (local mirror)      (sequencer + arbiter)
                                                                        │
                                                           SQLite log ──┴── dashboards
@@ -119,17 +119,17 @@ parallel against the live relay.
 
 Claims were attributed correctly again — `ash → src/auth.js`, `priya →
 src/billing.js`, `sam → src/api.js`, `ci-bot → src/types.js` + `test.js` — and
-the endpoint works. Every mechanical claim about coord survived the model swap.
+the endpoint works. Every mechanical claim about knoot survived the model swap.
 
 What did not survive is the behaviour the mechanism exists to reward. No agent
-ran `coord who`. No agent sent a message, though `coord msg` was in every prompt.
+ran `knoot who`. No agent sent a message, though `knoot msg` was in every prompt.
 Each stayed inside its own file and stopped. Zero collisions for the third time,
 but for the opposite reason: Opus avoided them by negotiating ownership, Haiku
 avoided them by never looking outside its lane.
 
 The cost shows up in the sign-offs. `ash` closed with *"Priya can now add
 `refreshSession()`"* — priya owns billing, not auth; `ci-bot` likewise recorded
-priya as the auth.js owner. Both had the ownership map wrong, and `coord who`
+priya as the auth.js owner. Both had the ownership map wrong, and `knoot who`
 would have corrected either one. Nothing in the Opus runs — the interface
 negotiation, the percentage-vs-fraction correction, the cross-file rounding bug
 found by the agent that owned neither file — has any analogue here. The 9-vs-65
@@ -143,9 +143,9 @@ may or may not think to run.
 
 **Reproduced from a clean seed**, scripted this time as `lab/haiku-run.sh`, with
 a prompt that pushed harder than `GOAL.md` does — it told each agent the other
-three were running in parallel and to run `coord who` before writing. Same
+three were running in parallel and to run `knoot who` before writing. Same
 outcome: 16/16 on ci-bot's own suite, correct attribution, **zero messages and
-zero `coord who` invocations** across all four transcripts. Being told to look
+zero `knoot who` invocations** across all four transcripts. Being told to look
 outside your lane is not enough; the mechanism has to arrive unasked.
 
 ---
@@ -153,7 +153,7 @@ outside your lane is not enough; the mechanism has to arrive unasked.
 ## First real repo: express, and the first recorded collision
 
 Every run above is a seeded toy — four files, one owner each — and every one of
-them produced zero collisions. So coord's central path had never fired. The next
+them produced zero collisions. So knoot's central path had never fired. The next
 run used a real codebase: **expressjs/express** at `023767f`, four Haiku agents,
 ordinary maintenance work, and three of the four given business in the *same
 file* so contention was forced rather than left to chance (`lab/dogfood.sh`).
@@ -188,10 +188,10 @@ This is the most useful thing to know about the project.
 
 1. **Bash writes bypassed claims entirely.** Only Write/Edit were gated, and
    auto mode prefers `sed`/heredocs. A session modified a claimed file with zero
-   recorded events. In practice coord gated almost nothing.
+   recorded events. In practice knoot gated almost nothing.
 2. **A blind spot from a fix.** Skipping any path a peer wrote during the audit
    window meant a holder editing every few seconds masked *every* intruding
-   write. A session added a function to a held file and coord recorded nothing —
+   write. A session added a function to a held file and knoot recorded nothing —
    no claim, no denial, no ungated write.
 3. **Idle sessions were pruned and could never re-register.** A 41-minute gap
    between startup and the first prompt destroyed identity for a whole run:
@@ -208,17 +208,17 @@ This is the most useful thing to know about the project.
    empty and it answered from nothing.
 8. **The shim's timeout equalled the daemon's worst case**, so under a hung
    relay it timed out blind instead of receiving the explicit fail-open verdict.
-9. **`wss://` panicked on the first handshake, and `coord status` said `[ok]`.**
+9. **`wss://` panicked on the first handshake, and `knoot status` said `[ok]`.**
    Found by deploying a relay to a real domain. rustls 0.23 will not pick a
    crypto provider unless the build names one, and its refusal is a panic — in
    the daemon's relay task, which then died. Failing open did the rest: every
-   edit allowed, `coord who` answering out of the purely local mirror, and the
+   edit allowed, `knoot who` answering out of the purely local mirror, and the
    hosted relay's event log empty at zero rows. Every hosted deployment before
    this was decorative.
-10. **`coord watch` dialled the relay with no token,** so the one surface a
+10. **`knoot watch` dialled the relay with no token,** so the one surface a
     human checks to confirm coordination is on would have shown a red dot
     against exactly the relays that need one.
-11. **`coord status` inferred the relay from the daemon.** It printed `[ok]`
+11. **`knoot status` inferred the relay from the daemon.** It printed `[ok]`
     whenever the daemon answered a local request and a token was on disk,
     neither of which is evidence of a connection — which is what let 9 and 10
     hide. It now asks the daemon (`DReq::Health`) for the socket state, whether
@@ -250,7 +250,7 @@ detection case and was reverted; the honest limitation is documented instead.
     never broadcasts, so the window is infinite and every platform sees it.
 
 Bug 11 is the pattern behind most of this list: a check that reports on the
-thing it can see rather than the thing you asked about. `coord status` exists
+thing it can see rather than the thing you asked about. `knoot status` exists
 because fail-open makes "off" invisible, and it was itself guessing.
 
 Bug 14 adds a second pattern worth naming: a test that can only fail by losing
@@ -321,9 +321,9 @@ cargo test                       # 84 tests, ~2.5s
 Give each agent its role from `GOAL.md`, then watch. Afterwards:
 
 ```sh
-source lab/metrics.sh && coord_metrics ~/.coord/relay.db   # or: ./lab/dogfood.sh report
+source lab/metrics.sh && knoot_metrics ~/.knoot/relay.db   # or: ./lab/dogfood.sh report
 ```
 
-`coord_metrics` holds the one copy of these queries: event counts, claims by
+`knoot_metrics` holds the one copy of these queries: event counts, claims by
 user, both collision tables, and every message. Note that `seq` is per-repo, so
 only `ts` orders runs against each other.

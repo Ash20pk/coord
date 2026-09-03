@@ -14,7 +14,7 @@ pub mod watch;
 /// with more or fewer than one provider feature, and the refusal is a *panic*
 /// inside whichever task happens to dial first. In a fail-open system that is
 /// the worst possible failure: the daemon's relay task died, every edit was
-/// still allowed, and `coord status` reported the relay as fine because a
+/// still allowed, and `knoot status` reported the relay as fine because a
 /// stored token is all it could see. Coordination was off and nothing said so.
 ///
 /// Idempotent, and safe to call from several tasks at once — losing the race

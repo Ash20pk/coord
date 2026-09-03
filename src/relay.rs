@@ -273,9 +273,9 @@ pub async fn run(listen: String, db_path: PathBuf, lab: Option<LabOpts>) -> Resu
     spawn_expiry_sweeper(app.clone());
     let router = routes(app);
     let shown = listen.replace("0.0.0.0", "127.0.0.1");
-    eprintln!("coord relay listening on ws://{listen}/ws (audit log: {})", db_path.display());
+    eprintln!("knoot relay listening on ws://{listen}/ws (audit log: {})", db_path.display());
     match relay_token() {
-        Some(_) => eprintln!("  auth:      token required (COORD_RELAY_TOKEN)"),
+        Some(_) => eprintln!("  auth:      token required (KNOOT_RELAY_TOKEN)"),
         None => {
             let loopback = listen.starts_with("127.0.0.1") || listen.starts_with("localhost");
             if loopback {
@@ -285,7 +285,7 @@ pub async fn run(listen: String, db_path: PathBuf, lab: Option<LabOpts>) -> Resu
                 // But an unauthenticated relay on a public interface hands
                 // anyone the event log and, in lab mode, a shell.
                 eprintln!(
-                    "  auth:      NONE, and {listen} is not loopback. Set COORD_RELAY_TOKEN \
+                    "  auth:      NONE, and {listen} is not loopback. Set KNOOT_RELAY_TOKEN \
                      unless something in front of this is doing authentication."
                 );
             }
@@ -303,7 +303,7 @@ pub async fn run(listen: String, db_path: PathBuf, lab: Option<LabOpts>) -> Resu
 /// which is right for `127.0.0.1` and wrong for anything hosted, so `serve`
 /// says so out loud at startup.
 pub fn relay_token() -> Option<String> {
-    std::env::var("COORD_RELAY_TOKEN").ok().filter(|t| !t.is_empty())
+    crate::config::env_or_legacy("KNOOT_RELAY_TOKEN")
 }
 
 /// Constant-time-ish comparison. Tokens are short and this is not the weak
@@ -758,8 +758,8 @@ async fn ws_handler(
 fn unauthorized() -> axum::response::Response {
     (
         axum::http::StatusCode::UNAUTHORIZED,
-        "coord relay: missing or invalid token. Run `coord login --relay <url> --token <token>`, \
-         or set COORD_TOKEN.\n",
+        "knoot relay: missing or invalid token. Run `knoot login --relay <url> --token <token>`, \
+         or set KNOOT_TOKEN.\n",
     )
         .into_response()
 }

@@ -28,7 +28,7 @@ knoot.dev, www.knoot.dev {
 }
 
 # The name teams are already enrolled against. Kept as its own site so an
-# existing `coord login --relay wss://relay.knoot.dev/ws` keeps working.
+# existing `knoot login --relay wss://relay.knoot.dev/ws` keeps working.
 relay.knoot.dev {
 	encode zstd gzip
 	reverse_proxy 127.0.0.1:7420 {

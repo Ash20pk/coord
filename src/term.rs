@@ -1,6 +1,6 @@
 //! PTY-backed agent terminals, so the browser can host real Claude Code
 //! sessions rather than a description of them. Each terminal is a pty running
-//! `claude` in the lab repo with its own COORD_USER identity.
+//! `claude` in the lab repo with its own KNOOT_USER identity.
 
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -75,12 +75,12 @@ fn spawn_one(dir: &Path, name: &str, program: &str) -> Result<Arc<Term>> {
 
     let mut cmd = CommandBuilder::new(program);
     cmd.cwd(dir);
-    cmd.env("COORD_USER", name);
+    cmd.env("KNOOT_USER", name);
     cmd.env("TERM", "xterm-256color");
     // Inherit the rest of the environment: PATH and the user's credentials
     // both matter, and overriding USER breaks Claude Code's login.
     for (k, v) in std::env::vars() {
-        if k != "COORD_USER" && k != "TERM" {
+        if k != "KNOOT_USER" && k != "TERM" {
             cmd.env(k, v);
         }
     }

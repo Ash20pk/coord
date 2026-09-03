@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# coordlab — a visible multiplayer test rig.
+# knootlab — a visible multiplayer test rig.
 #
 # Opens one tmux window: four Claude Code sessions in a 2x2 grid, each with its
-# own coord identity, plus a live dashboard across the bottom showing who holds
+# own knoot identity, plus a live dashboard across the bottom showing who holds
 # what and every collision as it happens.
 #
 #   ./lab/lab.sh            start (or re-attach)
@@ -10,21 +10,21 @@
 #   ./lab/lab.sh kill       tear everything down
 set -euo pipefail
 
-SESSION=coordlab
-COORD="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/release/coord"
-LAB="${COORDLAB_DIR:-$HOME/coordlab}"
-RELAY_ADDR="${COORD_RELAY_ADDR:-127.0.0.1:7420}"
+SESSION=knootlab
+COORD="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/release/knoot"
+LAB="${COORDLAB_DIR:-$HOME/knootlab}"
+RELAY_ADDR="${KNOOT_RELAY_ADDR:-127.0.0.1:7420}"
 RELAY_URL="ws://${RELAY_ADDR}/ws"
 AGENTS=(ash priya sam ci-bot)
 
 die() { echo "error: $*" >&2; exit 1; }
-[[ -x "$COORD" ]] || die "coord binary not built — run: cargo build --release"
+[[ -x "$COORD" ]] || die "knoot binary not built — run: cargo build --release"
 
 case "${1:-start}" in
 kill)
   tmux kill-session -t "$SESSION" 2>/dev/null || true
-  pkill -f "coord relay" 2>/dev/null || true
-  pkill -f "coord daemon" 2>/dev/null || true
+  pkill -f "knoot relay" 2>/dev/null || true
+  pkill -f "knoot daemon" 2>/dev/null || true
   echo "lab torn down."
   exit 0
   ;;
@@ -32,16 +32,16 @@ reset)
   # Also stop relay/daemon: a long-running instance from an older build would
   # otherwise keep serving, silently missing anything added since.
   tmux kill-session -t "$SESSION" 2>/dev/null || true
-  pkill -f "coord relay" 2>/dev/null || true
-  pkill -f "coord daemon" 2>/dev/null || true
+  pkill -f "knoot relay" 2>/dev/null || true
+  pkill -f "knoot daemon" 2>/dev/null || true
   sleep 0.4
-  rm -rf "$LAB" ~/.coord/relay.db
+  rm -rf "$LAB" ~/.knoot/relay.db
   echo "state wiped."
   ;;
 start) ;;
 web)
   # Browser-only lab: relay hosts two agent terminals, no tmux involved.
-  pkill -f "coord relay" 2>/dev/null || true
+  pkill -f "knoot relay" 2>/dev/null || true
   sleep 0.3
   ;;
 *) die "usage: lab.sh [start|web|reset|kill]" ;;
@@ -128,9 +128,9 @@ Division of labour (you will still collide — that is the point):
 - user D: test.js, plus the shared types both A and B need
 
 Rules:
-- Coordinate with `coord msg <user> "text"` — say when you finish something
+- Coordinate with `knoot msg <user> "text"` — say when you finish something
   someone is waiting on.
-- `coord who` shows who holds what. If you are blocked, you will be told when
+- `knoot who` shows who holds what. If you are blocked, you will be told when
   the file frees up.
 EOF
   cat > TASKS.md <<'EOF'
@@ -152,11 +152,11 @@ fi
 # ---------------------------------------------------------------- web mode
 if [[ "${1:-start}" == "web" ]]; then
   [[ -d "$LAB/.git" ]] || die "seed the lab first: ./lab/lab.sh reset"
-  pgrep -f "coord daemon" >/dev/null || { "$COORD" daemon >/tmp/coord-daemon.log 2>&1 & sleep 0.5; }
-  [[ -f "$LAB/.coord.toml" ]] || (cd "$LAB" && "$COORD" init --relay "$RELAY_URL" >/dev/null)
+  pgrep -f "knoot daemon" >/dev/null || { "$COORD" daemon >/tmp/knoot-daemon.log 2>&1 & sleep 0.5; }
+  [[ -f "$LAB/.knoot.toml" ]] || (cd "$LAB" && "$COORD" init --relay "$RELAY_URL" >/dev/null)
   echo "starting relay with browser terminals ..."
   "$COORD" relay --listen "$RELAY_ADDR" --lab-dir "$LAB" \
-      --agents "$(IFS=,; echo "${AGENTS[*]}")" >/tmp/coord-relay.log 2>&1 &
+      --agents "$(IFS=,; echo "${AGENTS[*]}")" >/tmp/knoot-relay.log 2>&1 &
   sleep 1.2
   URL="http://${RELAY_ADDR/0.0.0.0/127.0.0.1}/lab"
   echo "lab: $URL"
@@ -165,17 +165,17 @@ if [[ "${1:-start}" == "web" ]]; then
 fi
 
 # ----------------------------------------------------------- relay + daemon
-pgrep -f "coord relay" >/dev/null || {
+pgrep -f "knoot relay" >/dev/null || {
   echo "starting relay on $RELAY_ADDR ..."
-  "$COORD" relay --listen "$RELAY_ADDR" >/tmp/coord-relay.log 2>&1 &
+  "$COORD" relay --listen "$RELAY_ADDR" >/tmp/knoot-relay.log 2>&1 &
   sleep 0.6
 }
-pgrep -f "coord daemon" >/dev/null || {
+pgrep -f "knoot daemon" >/dev/null || {
   echo "starting daemon ..."
-  "$COORD" daemon >/tmp/coord-daemon.log 2>&1 &
+  "$COORD" daemon >/tmp/knoot-daemon.log 2>&1 &
   sleep 0.6
 }
-[[ -f "$LAB/.coord.toml" ]] || (cd "$LAB" && "$COORD" init --relay "$RELAY_URL" >/dev/null)
+[[ -f "$LAB/.knoot.toml" ]] || (cd "$LAB" && "$COORD" init --relay "$RELAY_URL" >/dev/null)
 
 # ------------------------------------------------------------------- layout
 # The grid needs vertical room: 4 agent panes stacked two-deep plus the strip.
@@ -207,10 +207,10 @@ panes=("$p0" "$p2" "$p1" "$p3")   # visual order: TL, BL, TR, BR
 for i in "${!AGENTS[@]}"; do
   name="${AGENTS[$i]}"; pane="${panes[$i]}"
   tmux select-pane -t "$pane" -T "agent: $name"
-  tmux send-keys -t "$pane" "clear; COORD_USER=$name claude" C-m
+  tmux send-keys -t "$pane" "clear; KNOOT_USER=$name claude" C-m
 done
 
-tmux select-pane -t "$dash" -T 'coord watch — live claims & collisions'
+tmux select-pane -t "$dash" -T 'knoot watch — live claims & collisions'
 tmux send-keys -t "$dash" "clear; '$COORD' watch" C-m
 
 tmux select-pane -t "$p0"

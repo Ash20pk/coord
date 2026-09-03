@@ -15,21 +15,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/lab/metrics.sh"
 source "$ROOT/lab/agent.sh"
-COORD="$ROOT/target/release/coord"
-LAB="${COORDLAB_DIR:-$HOME/coordlab}"
-RELAY_ADDR="${COORD_RELAY_ADDR:-127.0.0.1:7420}"
+COORD="$ROOT/target/release/knoot"
+LAB="${COORDLAB_DIR:-$HOME/knootlab}"
+RELAY_ADDR="${KNOOT_RELAY_ADDR:-127.0.0.1:7420}"
 RELAY_URL="ws://${RELAY_ADDR}/ws"
-DB="$HOME/.coord/relay.db"
-MODEL="${COORD_LAB_MODEL:-haiku}"
+DB="$HOME/.knoot/relay.db"
+MODEL="${KNOOT_LAB_MODEL:-haiku}"
 # Pushed context lands at the *start of a turn*, so a one-shot `claude -p` can
 # never see it: its single UserPromptSubmit fires before any peer has written
 # anything. Several turns per agent is the only setup where the mechanism is
 # observable at all.
-TURNS="${COORD_LAB_TURNS:-3}"
-OUT="${COORD_LAB_OUT:-/tmp/coord-haiku}"
+TURNS="${KNOOT_LAB_TURNS:-3}"
+OUT="${KNOOT_LAB_OUT:-/tmp/knoot-haiku}"
 
 die() { echo "error: $*" >&2; exit 1; }
-[[ -x "$COORD" ]] || die "coord binary not built — run: cargo build --release"
+[[ -x "$COORD" ]] || die "knoot binary not built — run: cargo build --release"
 command -v claude >/dev/null || die "claude CLI not on PATH"
 command -v sqlite3 >/dev/null || die "sqlite3 not on PATH"
 
@@ -45,7 +45,7 @@ prompt_for() {
 AGENTS=(ash priya sam ci-bot)
 
 report() {
-  coord_metrics "$DB" "$(sqlite3 "$DB" "select repo from events group by repo order by max(ts) desc limit 1")"
+  knoot_metrics "$DB" "$(sqlite3 "$DB" "select repo from events group by repo order by max(ts) desc limit 1")"
   echo "transcripts: $OUT/<agent>.log"
   if [[ -f "$LAB/test.js" ]]; then
     echo
@@ -57,8 +57,8 @@ report() {
 case "${1:-run}" in
 report) report; exit 0 ;;
 reset)
-  pkill -f "coord relay" 2>/dev/null || true
-  pkill -f "coord daemon" 2>/dev/null || true
+  pkill -f "knoot relay" 2>/dev/null || true
+  pkill -f "knoot daemon" 2>/dev/null || true
   sleep 0.4
   rm -rf "$LAB" "$DB"
   # `lab.sh web` reseeds $LAB and brings the relay back up with the browser
@@ -71,9 +71,9 @@ run) ;;
 esac
 
 [[ -d "$LAB/.git" ]] || die "lab repo not seeded — run: ./lab/lab.sh reset"
-pgrep -f "coord relay" >/dev/null || { "$COORD" relay --listen "$RELAY_ADDR" >/tmp/coord-relay.log 2>&1 & sleep 0.6; }
-pgrep -f "coord daemon" >/dev/null || { "$COORD" daemon >/tmp/coord-daemon.log 2>&1 & sleep 0.6; }
-[[ -f "$LAB/.coord.toml" ]] || (cd "$LAB" && "$COORD" init --relay "$RELAY_URL" >/dev/null)
+pgrep -f "knoot relay" >/dev/null || { "$COORD" relay --listen "$RELAY_ADDR" >/tmp/knoot-relay.log 2>&1 & sleep 0.6; }
+pgrep -f "knoot daemon" >/dev/null || { "$COORD" daemon >/tmp/knoot-daemon.log 2>&1 & sleep 0.6; }
+[[ -f "$LAB/.knoot.toml" ]] || (cd "$LAB" && "$COORD" init --relay "$RELAY_URL" >/dev/null)
 
 mkdir -p "$OUT"
 echo "running ${#AGENTS[@]} $MODEL agents headless in $LAB, $TURNS turns each ..."
@@ -84,8 +84,8 @@ Read GOAL.md — it is the shared objective and you are one of four agents worki
 this repo at the same time. You are user "$name". $(prompt_for "$name")
 
 The other three are working in parallel right now and you depend on their files.
-Before you write, run \`coord who\` to see who holds what, and use
-\`coord msg <user|all> "text"\` to agree on interfaces and to say when you have
+Before you write, run \`knoot who\` to see who holds what, and use
+\`knoot msg <user|all> "text"\` to agree on interfaces and to say when you have
 finished something someone else is waiting on. Stay inside the file you own.
 Work until your part of the definition of done in GOAL.md holds.
 EOF

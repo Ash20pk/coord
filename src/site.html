@@ -460,7 +460,7 @@ footer .sp { margin-left: auto; font-family: var(--mono); font-size: 12px; }
         <div class="bar"><i></i><i></i><i></i><span>priya — Claude Code</span></div>
 <pre><span class="d">&gt; add refreshSession() to auth.js</span>
 
-<span class="r">✗ Edit blocked by coord</span>
+<span class="r">✗ Edit blocked by knoot</span>
 
 <span class="c">`src/auth.js`</span> is currently claimed by <span class="g">ash</span>
 <span class="d">(session a1b2c3d4…)</span>
@@ -472,7 +472,7 @@ Lease expires in <span class="c">~7m</span>.
 something else, or wait — you will be
 told automatically when it is released.
 To coordinate directly, run:</span>
-  <span class="g">coord msg ash "your question"</span>
+  <span class="g">knoot msg ash "your question"</span>
 
 <span class="d">&gt; I'll take the token store instead, and
   ping ash about the export contract.</span>
@@ -546,8 +546,8 @@ To coordinate directly, run:</span>
         strings</strong> cross the wire — never file contents, never diffs.
       </p>
       <div class="terminal" style="margin-top:18px">
-        <div class="bar"><i></i><i></i><i></i><span>coord status</span></div>
-<pre><span class="g">[ok  ]</span> binary    /usr/local/bin/coord
+        <div class="bar"><i></i><i></i><i></i><span>knoot status</span></div>
+<pre><span class="g">[ok  ]</span> binary    /usr/local/bin/knoot
 <span class="g">[ok  ]</span> repo      ~/project <span class="d">(id: project-4f2a1c)</span>
 <span class="g">[ok  ]</span> hooks     6 events, resolved from PATH
 <span class="g">[ok  ]</span> daemon    responding
@@ -592,7 +592,7 @@ coordination is on.
       <div class="act-n">Under the hood</div>
       <h2>Four moving parts, one of them yours</h2>
       <p>
-        Hooks are installed by <code>coord init</code> and committed to the repo, so
+        Hooks are installed by <code>knoot init</code> and committed to the repo, so
         anyone who clones it is enrolled. You run a daemon; we run the sequencer.
       </p>
     </div>
@@ -605,7 +605,7 @@ coordination is on.
       <div class="node">
         <div class="ic">🪝</div>
         <h3>Hooks</h3>
-        <p>Every write, prompt and turn-end calls <code>coord hook</code>. Bash is parsed for redirects, <code>tee</code>, <code>sed -i</code> too.</p>
+        <p>Every write, prompt and turn-end calls <code>knoot hook</code>. Bash is parsed for redirects, <code>tee</code>, <code>sed -i</code> too.</p>
       </div>
       <div class="node">
         <div class="ic">⚙️</div>
@@ -638,7 +638,7 @@ coordination is on.
       <div class="card">
         <div class="k">🌱</div>
         <h3>Zero-setup clones</h3>
-        <p><code>.coord.toml</code> and the hooks are committed. A teammate needs the binary, a daemon, and one <code>coord login</code>.</p>
+        <p><code>.knoot.toml</code> and the hooks are committed. A teammate needs the binary, a daemon, and one <code>knoot login</code>.</p>
       </div>
       <div class="card">
         <div class="k">🔒</div>
@@ -648,7 +648,7 @@ coordination is on.
       <div class="card">
         <div class="k">📡</div>
         <h3>Your own relay, any time</h3>
-        <p>It is one binary and one flag: <code>coord relay --listen 0.0.0.0:7420</code>. knoot.dev is a convenience, never a dependency.</p>
+        <p>It is one binary and one flag: <code>knoot relay --listen 0.0.0.0:7420</code>. knoot.dev is a convenience, never a dependency.</p>
       </div>
     </div>
   </div>
@@ -681,20 +681,20 @@ coordination is on.
         <ol class="steps">
           <li>
             Install the binary on every machine that runs agents.
-            <div class="cmd"><code>cargo install --git https://github.com/Ash20pk/coord</code><button class="copy" type="button">copy</button></div>
+            <div class="cmd"><code>cargo install --git https://github.com/Ash20pk/knoot</code><button class="copy" type="button">copy</button></div>
           </li>
           <li>
             Enrol the repo once. Commit what it writes — teammates who clone are enrolled with no setup.
-            <div class="cmd"><code id="cmd-init">coord init --relay wss://knoot.dev/ws</code><button class="copy" type="button">copy</button></div>
+            <div class="cmd"><code id="cmd-init">knoot init --relay wss://knoot.dev/ws</code><button class="copy" type="button">copy</button></div>
           </li>
           <li>
             Each teammate stores the team token once, then runs a daemon.
-            <div class="cmd"><code id="cmd-login">coord login --relay wss://knoot.dev/ws --token &lt;token&gt;</code><button class="copy" type="button">copy</button></div>
-            <div class="cmd"><code>coord daemon</code><button class="copy" type="button">copy</button></div>
+            <div class="cmd"><code id="cmd-login">knoot login --relay wss://knoot.dev/ws --token &lt;token&gt;</code><button class="copy" type="button">copy</button></div>
+            <div class="cmd"><code>knoot daemon</code><button class="copy" type="button">copy</button></div>
           </li>
           <li>
             Confirm it is actually on — it fails open, so a broken install looks exactly like a quiet one.
-            <div class="cmd"><code>coord status</code><button class="copy" type="button">copy</button></div>
+            <div class="cmd"><code>knoot status</code><button class="copy" type="button">copy</button></div>
           </li>
         </ol>
       </div>
@@ -705,7 +705,7 @@ coordination is on.
 <footer>
   <div class="wrap">
     <div class="logo" style="font-size:20px"><span class="dot"></span>knoot</div>
-    <a href="https://github.com/Ash20pk/coord">GitHub</a>
+    <a href="https://github.com/Ash20pk/knoot">GitHub</a>
     <a href="/app">Console</a>
     <a href="/ops">Operator view</a>
     <span class="sp" id="relay-line">relay: —</span>
@@ -727,8 +727,8 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
 const WS_SCHEME = location.protocol === 'https:' ? 'wss' : 'ws';
 const RELAY_WS = `${WS_SCHEME}://${location.host}/ws`;
 $('#relay-line').textContent = `relay: ${RELAY_WS}`;
-$('#cmd-init').textContent = `coord init --relay ${RELAY_WS}`;
-$('#cmd-login').textContent = `coord login --relay ${RELAY_WS} --token <token>`;
+$('#cmd-init').textContent = `knoot init --relay ${RELAY_WS}`;
+$('#cmd-login').textContent = `knoot login --relay ${RELAY_WS} --token <token>`;
 
 document.querySelectorAll('.copy').forEach((b) => {
   b.addEventListener('click', () => {
@@ -759,7 +759,7 @@ $('#reg-form').addEventListener('submit', async (e) => {
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || `registration failed (${r.status})`);
     $('#reg-token').textContent = j.token;
-    $('#cmd-login').textContent = `coord login --relay ${RELAY_WS} --token ${j.token}`;
+    $('#cmd-login').textContent = `knoot login --relay ${RELAY_WS} --token ${j.token}`;
     $('#reg-console').href = `/app?token=${encodeURIComponent(j.token)}`;
     $('#reg-out').classList.add('show');
     $('#reg-form').style.display = 'none';
@@ -792,7 +792,7 @@ $('#reg-form').addEventListener('submit', async (e) => {
     { tag: 'scene 2', text: '<strong>The collision.</strong> They reach for the same file. Whoever writes last wins, and nobody is told anything.' },
     { tag: 'scene 3', text: '<strong>The claim.</strong> ash holds <code>auth.js</code> on a lease. priya is handed a conflict brief — holder, intent, expiry — and re-plans.' },
     { tag: 'scene 4', text: '<strong>They talk.</strong> Ownership announced, export contracts published, patches offered. The collision is avoided before the block.' },
-    { tag: 'scene 5', text: '<strong>Fail open.</strong> The relay vanishes and both keep working. coord is never the reason an agent cannot write.' },
+    { tag: 'scene 5', text: '<strong>Fail open.</strong> The relay vanishes and both keep working. knoot is never the reason an agent cannot write.' },
   ];
 
   let renderer;

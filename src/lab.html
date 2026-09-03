@@ -1,7 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>coord lab</title>
+<title>knoot lab</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css">
 <style>
   :root{
@@ -70,7 +70,7 @@
 </style>
 
 <header>
-  <div class="brand"><span class="dot" id="dot"></span>coord lab</div>
+  <div class="brand"><span class="dot" id="dot"></span>knoot lab</div>
   <span class="repo" id="repo">…</span>
   <a class="link" href="/">full dashboard →</a>
   <div class="stats">
@@ -84,7 +84,7 @@
 <main>
   <div id="terms"></div>
   <aside>
-    <h2>coord event log <span id="live-tag" class="tag"></span></h2>
+    <h2>knoot event log <span id="live-tag" class="tag"></span></h2>
     <div id="feed"><div class="empty">waiting for activity…</div></div>
     <div class="hint">Click a terminal to type. Give both the same file to see a block.</div>
   </aside>
@@ -99,8 +99,8 @@
 const TOKEN = (() => {
   const q = new URLSearchParams(location.search).get('token');
   try {
-    if (q) { sessionStorage.setItem('coordToken', q); return q; }
-    return sessionStorage.getItem('coordToken') || '';
+    if (q) { sessionStorage.setItem('knootToken', q); return q; }
+    return sessionStorage.getItem('knootToken') || '';
   } catch (_) { return q || ''; }
 })();
 const withTok = (u) => TOKEN ? u + (u.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN) : u;

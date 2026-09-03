@@ -4,8 +4,8 @@
 # contention prevented and `ungated_write` is contention caught too late,
 # which are the two numbers the whole design lives or dies by.
 #
-#   coord_metrics <db> [repo]      # repo defaults to the most recent one
-coord_metrics() {
+#   knoot_metrics <db> [repo]      # repo defaults to the most recent one
+knoot_metrics() {
   local db="$1" repo="${2:-}"
   [[ -f "$db" ]] || { echo "no event log at $db" >&2; return 1; }
   [[ -n "$repo" ]] || repo=$(sqlite3 "$db" "select repo from events group by repo order by max(ts) desc limit 1")

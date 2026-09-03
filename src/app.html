@@ -3,7 +3,7 @@
 
   Three jobs: hand over the enrolment commands already filled in, manage the
   team's tokens, and show the live event log so a human can tell coordination
-  is actually on. That last one matters more than it looks: coord fails open,
+  is actually on. That last one matters more than it looks: knoot fails open,
   so a broken install is indistinguishable from a quiet one from inside an
   agent. This page is where you look instead.
 -->
@@ -182,7 +182,7 @@ td.mono, .mono { font-family: var(--mono); font-size: 12.5px; }
     <span class="team hidden" id="team-pill">—</span>
     <div class="right">
       <a href="/">Home</a>
-      <a href="https://github.com/Ash20pk/coord">Docs</a>
+      <a href="https://github.com/Ash20pk/knoot">Docs</a>
       <a href="#" id="signout" class="hidden">Sign out</a>
     </div>
   </div>
@@ -212,14 +212,14 @@ td.mono, .mono { font-family: var(--mono); font-size: 12.5px; }
       <div class="body">
         <p>Run these where your agents run. The first is once per repo; the rest are once per machine.</p>
         <div class="step-label">1 · install</div>
-        <div class="cmd"><code>cargo install --git https://github.com/Ash20pk/coord</code><button class="copy">copy</button></div>
+        <div class="cmd"><code>cargo install --git https://github.com/Ash20pk/knoot</code><button class="copy">copy</button></div>
         <div class="step-label">2 · enrol the repo, then commit what it writes</div>
         <div class="cmd"><code id="c-init"></code><button class="copy">copy</button></div>
         <div class="step-label">3 · store the token, once per machine</div>
         <div class="cmd"><code id="c-login"></code><button class="copy">copy</button></div>
         <div class="step-label">4 · run the daemon, then check it is really on</div>
-        <div class="cmd"><code>coord daemon</code><button class="copy">copy</button></div>
-        <div class="cmd"><code>coord status</code><button class="copy">copy</button></div>
+        <div class="cmd"><code>knoot daemon</code><button class="copy">copy</button></div>
+        <div class="cmd"><code>knoot status</code><button class="copy">copy</button></div>
       </div>
     </section>
 
@@ -267,11 +267,11 @@ td.mono, .mono { font-family: var(--mono); font-size: 12.5px; }
       <h2>🧪 Prove it works</h2>
       <div class="body">
         <p style="margin-top:0">
-          coord fails open, so silence means nothing on its own. To see this page
+          knoot fails open, so silence means nothing on its own. To see this page
           light up, give two sessions the same file in an enrolled repo:
         </p>
-        <div class="cmd"><code>COORD_USER=ash claude</code><button class="copy">copy</button></div>
-        <div class="cmd"><code>COORD_USER=priya claude</code><button class="copy">copy</button></div>
+        <div class="cmd"><code>KNOOT_USER=ash claude</code><button class="copy">copy</button></div>
+        <div class="cmd"><code>KNOOT_USER=priya claude</code><button class="copy">copy</button></div>
         <p style="margin-bottom:0">
           Ask both to refactor the same module. The second gets a conflict brief with
           the first's identity and intent, and the denial appears above as
@@ -338,8 +338,8 @@ async function open_(tok) {
   pill.classList.remove('hidden');
   pill.textContent = `${t.team} · ${t.team_id}`;
 
-  $('#c-init').textContent = `coord init --relay ${RELAY_WS}`;
-  $('#c-login').textContent = `coord login --relay ${RELAY_WS} --token ${tok}`;
+  $('#c-init').textContent = `knoot init --relay ${RELAY_WS}`;
+  $('#c-login').textContent = `knoot login --relay ${RELAY_WS} --token ${tok}`;
 
   renderTokens(t.tokens || []);
   renderRepos(t.repos || []);
@@ -453,8 +453,8 @@ function renderRepos(repos) {
     sel.innerHTML = '<option value="">no repos yet</option>';
     $('#log').innerHTML = `<div class="empty">
       Nothing has connected yet.<br><br>
-      Run <span style="color:var(--cyan)">coord init</span> in a repo with the commands on
-      the left, start <span style="color:var(--cyan)">coord daemon</span>, and this fills
+      Run <span style="color:var(--cyan)">knoot init</span> in a repo with the commands on
+      the left, start <span style="color:var(--cyan)">knoot daemon</span>, and this fills
       in as your agents work.</div>`;
     setDot(null);
     return;

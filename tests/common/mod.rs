@@ -1,14 +1,14 @@
 //! Shared helpers for integration tests.
 #![allow(dead_code)]
 
-use coord::proto::*;
+use knoot::proto::*;
 use futures_util::{SinkExt, StreamExt};
 use std::path::PathBuf;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 pub fn tmp(tag: &str) -> PathBuf {
-    let p = std::env::temp_dir().join(format!("coord-test-{}-{}", tag, uuid::Uuid::new_v4()));
+    let p = std::env::temp_dir().join(format!("knoot-test-{}-{}", tag, uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
@@ -16,7 +16,7 @@ pub fn tmp(tag: &str) -> PathBuf {
 /// Start an in-process relay that requires `token`; returns its ws:// URL.
 pub async fn start_relay_with_token(token: &str) -> String {
     let db = tmp("relay").join("relay.db");
-    let addr = coord::relay::start_with_token("127.0.0.1:0", db, Some(token.to_string()))
+    let addr = knoot::relay::start_with_token("127.0.0.1:0", db, Some(token.to_string()))
         .await
         .unwrap();
     format!("ws://{addr}/ws")
@@ -25,7 +25,7 @@ pub async fn start_relay_with_token(token: &str) -> String {
 /// Start an in-process relay on an ephemeral port; returns its ws:// URL.
 pub async fn start_relay() -> String {
     let db = tmp("relay").join("relay.db");
-    let addr = coord::relay::start("127.0.0.1:0", db).await.unwrap();
+    let addr = knoot::relay::start("127.0.0.1:0", db).await.unwrap();
     format!("ws://{addr}/ws")
 }
 
@@ -98,9 +98,9 @@ impl Client {
     }
 }
 
-/// Write a .coord.toml so the daemon treats `root` as a coord repo.
+/// Write a .knoot.toml so the daemon treats `root` as a knoot repo.
 pub fn init_repo(root: &PathBuf, relay: &str, repo: &str) {
-    coord::config::RepoConfig { relay: relay.into(), repo: repo.into() }
+    knoot::config::RepoConfig { relay: relay.into(), repo: repo.into() }
         .save(root)
         .unwrap();
 }
@@ -119,7 +119,7 @@ pub async fn start_daemon() -> PathBuf {
     let sock = tmp_sock_dir().join("s");
     let s = sock.clone();
     tokio::spawn(async move {
-        let _ = coord::daemon::run_on(s).await;
+        let _ = knoot::daemon::run_on(s).await;
     });
     // Wait for the socket to accept connections.
     for _ in 0..100 {
@@ -134,7 +134,7 @@ pub async fn start_daemon() -> PathBuf {
 /// Blocking daemon call from an async test, off the runtime threads.
 pub async fn ask(sock: &PathBuf, req: DReq) -> Option<DResp> {
     let (sock, req) = (sock.clone(), req);
-    tokio::task::spawn_blocking(move || coord::hook::call_daemon_at(&sock, &req))
+    tokio::task::spawn_blocking(move || knoot::hook::call_daemon_at(&sock, &req))
         .await
         .unwrap()
 }
@@ -210,7 +210,7 @@ pub fn watch_ungated(url: &str, repo: &str) -> std::sync::Arc<std::sync::atomic:
 
 /// Blocking daemon call from a sync test context.
 pub fn ask_daemon(sock: &PathBuf, req: DReq) -> Option<DResp> {
-    coord::hook::call_daemon_at(sock, &req)
+    knoot::hook::call_daemon_at(sock, &req)
 }
 
 /// A relay that grants every claim and then says nothing else — no event
