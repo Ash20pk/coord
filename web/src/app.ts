@@ -20,6 +20,27 @@ let currentRepo: string | null = null;
 /* ------------------------------------------------------------------ *
  * Auth
  * ------------------------------------------------------------------ */
+/**
+ * Where a requested team name waits out email confirmation.
+ *
+ * When a project requires confirmation, sign-up returns no session, so the
+ * team cannot be created yet. Without this the name someone typed is lost
+ * between clicking the link and signing in, and they land in a team named
+ * after their email address instead.
+ */
+const PENDING_TEAM = 'knoot.pendingTeam';
+
+const rememberTeamName = (name: string): void => {
+  try { if (name) localStorage.setItem(PENDING_TEAM, name); } catch { /* private mode */ }
+};
+const takeTeamName = (): string | null => {
+  try {
+    const v = localStorage.getItem(PENDING_TEAM);
+    localStorage.removeItem(PENDING_TEAM);
+    return v;
+  } catch { return null; }
+};
+
 type Mode = 'signin' | 'signup';
 let mode: Mode = location.hash === '#signup' ? 'signup' : 'signin';
 
@@ -91,13 +112,17 @@ $('#auth-form')!.addEventListener('submit', async (ev) => {
     if (mode === 'signup') {
       const { data, error } = await sb.auth.signUp({ email, password });
       if (error) throw new Error(error.message);
+      rememberTeamName(teamName);
       if (!data.session) {
-        authMessage('ok', `Check ${email} to confirm your address, then sign in.`);
+        // The project requires email confirmation, so there is no session to
+        // create a team with yet. It is made on first sign-in instead.
+        authMessage('ok', `Check ${email} to confirm your address, then sign in. Your team is created when you first sign in.`);
         mode = 'signin';
         paintAuthMode();
         return;
       }
       await createTeam(teamName || `${email.split('@')[0]}'s team`);
+      takeTeamName();
     } else {
       const { error } = await sb.auth.signInWithPassword({ email, password });
       if (error) throw new Error(error.message);
@@ -485,8 +510,10 @@ async function boot(): Promise<void> {
   try {
     const found = await loadTeam();
     if (!found) {
+      // First sign-in after confirming: make the team, using the name asked
+      // for at sign-up if it survived in this browser.
       const email = data.session.user.email ?? 'your';
-      team = await createTeam(`${email.split('@')[0]}'s team`);
+      team = await createTeam(takeTeamName() || `${email.split('@')[0]}'s team`);
       role = 'owner';
     } else {
       team = found.team;

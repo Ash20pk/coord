@@ -5,6 +5,9 @@ import { resolve } from 'node:path';
 // serves from an embedded copy — so there is still one binary and no CORS.
 export default defineConfig({
   appType: 'mpa',
+  // KNOOT_NO_ENV points Vite at an empty env directory, so the dist committed
+  // to the repository carries no project keys. See config/no-env/README.md.
+  envDir: process.env.KNOOT_NO_ENV ? resolve(__dirname, 'config/no-env') : undefined,
   build: {
     outDir: 'dist',
     emptyOutDir: true,

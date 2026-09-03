@@ -41,6 +41,9 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
+      # `build`, not `build:oss`: the release binary is the hosted one and gets
+      # the real publishable key. The dist committed to the repository is built
+      # keyless, so `cargo install --git` never inherits someone's project.
       - name: Build the web front end
         env:
           # The publishable key is public by design and ends up in the bundle.
