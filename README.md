@@ -186,8 +186,25 @@ sending it as a bearer token is rejected as an invalid JWT. It goes in the
 `apikey` header alone, and `src/cloud.rs` has a test for each format.
 
 Apply `supabase/migrations/0001_teams.sql` first. It creates `teams` and
-`team_members` behind row-level security, so a browser holding the anon key can
-read only its own team.
+`team_members` behind row-level security, so a browser holding the publishable
+key can read only its own team.
+
+Three places hold configuration, and the split is the security boundary:
+
+| Where | What goes there | Why |
+|---|---|---|
+| `web/.env` (gitignored) | `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` | Local development. Vite reads it at build time. |
+| GitHub Actions secrets | `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` | CI bakes them into the released binary's front end. |
+| `/etc/knoot/supabase.env` on the relay host, 0600 | all three, including `SUPABASE_SECRET_KEY` | The relay resolves team membership at run time. |
+
+The secret key appears in exactly one of those. Anything named `VITE_*` is
+compiled into JavaScript that anyone can read, so a secret key must never be
+set there.
+
+The `dist/` committed to this repository is built by `npm run build:oss`, which
+points Vite at an empty env directory. That keeps one project's keys out of
+what `cargo install --git` serves; a self-hosted console simply reports that
+sign-in is not configured, and agent tokens work as usual.
 
 
 ## How it works
