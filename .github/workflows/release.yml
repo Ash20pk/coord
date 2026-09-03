@@ -1,0 +1,69 @@
+# Build the Linux binary here, not on the box it runs on.
+#
+# The droplet is 1 vCPU / 961 MB: a release build with LTO needs a 2 GB
+# swapfile to link at all, takes minutes, and competes for memory with the
+# relay it is about to replace. Building here and downloading there makes a
+# deploy a 30-second file copy.
+#
+# musl, statically linked, so one artifact runs on any Linux without caring
+# which glibc the host shipped.
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the musl target
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        env:
+          # rusqlite bundles SQLite as C, and ring builds assembly; both need
+          # to be told to use the musl toolchain rather than the host's.
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Package
+        run: |
+          install -m 0755 target/x86_64-unknown-linux-musl/release/coord coord-x86_64-linux
+          # Statically linked, or the whole point is lost.
+          file coord-x86_64-linux
+          ldd coord-x86_64-linux 2>&1 | grep -q "not a dynamic executable" \
+            || { echo "binary is dynamically linked"; exit 1; }
+          ./coord-x86_64-linux --version
+          sha256sum coord-x86_64-linux > coord-x86_64-linux.sha256
+          cat coord-x86_64-linux.sha256
+
+      # A single moving tag the provisioner can always point at, plus the
+      # commit it was built from so a deploy is traceable to a revision.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          gh release create nightly \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "nightly ($(git rev-parse --short "$GITHUB_SHA"))" \
+            --notes "Static x86_64 Linux build of $(git rev-parse --short "$GITHUB_SHA"): $(git log -1 --format=%s "$GITHUB_SHA")" \
+            coord-x86_64-linux coord-x86_64-linux.sha256

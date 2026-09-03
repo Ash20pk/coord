@@ -173,6 +173,7 @@ async fn prepare_with_token(
         std::fs::create_dir_all(dir)?;
     }
     let conn = rusqlite::Connection::open(&db_path)?;
+    configure_sqlite(&conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS events (
             repo TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, json TEXT NOT NULL
@@ -189,6 +190,27 @@ async fn prepare_with_token(
     });
     let listener = tokio::net::TcpListener::bind(listen).await?;
     Ok((listener, app))
+}
+
+/// Durability settings for the event log.
+///
+/// WAL is not a performance tweak here: continuous replication (Litestream and
+/// everything like it) reads the write-ahead log, and against a rollback-
+/// journal database it silently replicates nothing at all. A relay whose log
+/// is not replicable is a relay whose log is one disk away from gone, so this
+/// is asserted by a test rather than left to a comment.
+pub fn configure_sqlite(conn: &rusqlite::Connection) -> Result<()> {
+    let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
+    anyhow::ensure!(mode.eq_ignore_ascii_case("wal"), "could not enable WAL (got {mode})");
+    // Safe with WAL: a crash can lose the tail of the last transaction group,
+    // never the database. Full fsync per commit would put a disk flush on the
+    // claim path, which is the one path that must stay in single-digit ms.
+    conn.execute_batch(
+        "PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA wal_autocheckpoint = 1000;",
+    )?;
+    Ok(())
 }
 
 pub struct LabOpts {

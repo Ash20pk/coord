@@ -267,3 +267,32 @@ async fn a_restarted_relay_recovers_its_claims_and_its_sequence() {
         .unwrap();
     assert!(seq_after > seq_before, "the sequence must continue: {seq_before} → {seq_after}");
 }
+
+/// A log that cannot be replicated cannot be backed up continuously, and this
+/// is invisible when it breaks: Litestream against a rollback-journal database
+/// replicates nothing and says nothing. The relay must leave WAL on, and a
+/// `-wal` file next to the database is the observable proof.
+#[tokio::test]
+async fn the_event_log_is_replicable() {
+    let db = common::tmp("wal").join("relay.db");
+    let addr = coord::relay::start_with_token("127.0.0.1:0", db.clone(), None).await.unwrap();
+
+    let mut c = common::Client::connect(&format!("ws://{addr}/ws"), "r1").await;
+    assert!(c.request_claim("s1", "src/a.js", "work").await);
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let mode: String =
+        conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+    assert!(
+        mode.eq_ignore_ascii_case("wal"),
+        "journal_mode is {mode}: continuous replication would silently do nothing"
+    );
+
+    for _ in 0..40 {
+        if db.with_extension("db-wal").exists() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("no write-ahead log appeared beside the database");
+}
