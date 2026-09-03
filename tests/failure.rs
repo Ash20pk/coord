@@ -110,6 +110,7 @@ async fn expired_lease_unblocks_a_peer_without_any_release() {
         lease_until: now_ms() + 40, // about to expire
         intent: "died mid-turn".into(),
         branch: String::new(),
+        ts: now_ms(),
     });
     assert!(v.conflicting("peer", "src/auth.ts").is_some(), "blocked while lease is live");
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
@@ -212,4 +213,57 @@ async fn a_wss_relay_does_not_panic_the_dialer() {
         Ok(r) => assert!(r.is_err(), "a non-TLS listener cannot complete a wss handshake"),
         Err(_) => panic!("wss dial hung instead of failing"),
     }
+}
+
+/// A relay restart used to begin again at seq 0 — writing duplicate sequence
+/// numbers into the one log whose purpose is to be sequenced — and to come
+/// back with no claims at all, so two agents could hold the same file across
+/// it. Found by watching a dashboard show an empty repo that plainly was not.
+#[tokio::test]
+async fn a_restarted_relay_recovers_its_claims_and_its_sequence() {
+    let db = common::tmp("restart").join("relay.db");
+
+    // First life: ash takes a file.
+    let addr = coord::relay::start_with_token("127.0.0.1:0", db.clone(), None).await.unwrap();
+    let url = format!("ws://{addr}/ws");
+    {
+        let mut ash = common::Client::connect(&url, "r1").await;
+        assert!(ash.request_claim("sessA", "src/auth.js", "long refactor").await);
+    }
+
+    let seq_before = {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.query_row("SELECT MAX(seq) FROM events WHERE repo = 'local/r1'", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    assert!(seq_before > 0, "the first life must have written a sequenced log");
+
+    // Second life: a new relay process over the same database.
+    let addr2 = coord::relay::start_with_token("127.0.0.1:0", db.clone(), None).await.unwrap();
+    let url2 = format!("ws://{addr2}/ws");
+
+    // priya, arriving after the restart, must still be refused.
+    let mut priya = common::Client::connect(&url2, "r1").await;
+    assert!(
+        !priya.request_claim("sessB", "src/auth.js", "add refreshSession").await,
+        "a claim held before the restart must survive it"
+    );
+
+    // And the log must continue rather than restart.
+    let c = rusqlite::Connection::open(&db).unwrap();
+    let dupes: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM (SELECT seq FROM events WHERE repo = 'local/r1' \
+             GROUP BY seq HAVING COUNT(*) > 1)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(dupes, 0, "a restart must not reuse sequence numbers");
+    let seq_after: i64 = c
+        .query_row("SELECT MAX(seq) FROM events WHERE repo = 'local/r1'", [], |r| r.get(0))
+        .unwrap();
+    assert!(seq_after > seq_before, "the sequence must continue: {seq_before} → {seq_after}");
 }

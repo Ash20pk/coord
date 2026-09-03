@@ -19,6 +19,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 futures-util = "0.3"
 rusqlite = { version = "0.31", features = ["bundled"] }
 dirs = "5"
+sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 toml = "0.8"
 terminal_size = "0.3"

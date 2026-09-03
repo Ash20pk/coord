@@ -8,6 +8,7 @@
 set -euo pipefail
 
 DOMAIN="${DOMAIN:-relay.knoot.dev}"
+APEX="${APEX:-knoot.dev}"
 REF="${REF:-main}"
 REPO="${REPO:-https://github.com/Ash20pk/coord.git}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,7 +87,14 @@ systemctl enable --quiet coord-relay
 systemctl restart coord-relay
 
 say "caddy"
-sed "s/relay\.knoot\.dev/$DOMAIN/" "$HERE/Caddyfile" > /etc/caddy/Caddyfile
+# APEX serves the site and console; DOMAIN stays the relay hostname teams are
+# already enrolled against. Both proxy the same binary.
+# Order matters: the longer name is substituted first, or `relay.knoot.dev`
+# would be rewritten to `relay.<apex>` by the second rule.
+sed -e "s/relay\.knoot\.dev/$DOMAIN/g" -e "s/knoot\.dev/$APEX/g" \
+	"$HERE/Caddyfile" > /etc/caddy/Caddyfile
+caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+caddy validate --config /etc/caddy/Caddyfile 2>&1 | tail -3
 systemctl reload caddy || systemctl restart caddy
 
 say "firewall"
@@ -114,6 +122,8 @@ cat <<OUT
 
 relay is up.
 
+  site:           https://$APEX
+  console:        https://$APEX/app
   enroll a repo:  coord init --relay wss://$DOMAIN/ws
   each teammate:  coord login --relay wss://$DOMAIN/ws --token $TOKEN
   dashboard:      https://$DOMAIN/?token=$TOKEN

@@ -657,6 +657,7 @@ fn claim_locally(rc: &Arc<RepoConn>, session: &str, path: &str) {
         lease_until: now_ms() + LEASE_MS,
         intent,
         branch,
+        ts: now_ms(),
     };
     rc.view.lock().unwrap().apply(&ev);
     let _ = rc.tx.send(ClientMsg::Append { event: ev });

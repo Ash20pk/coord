@@ -47,6 +47,11 @@ pub enum Event {
         intent: String,
         #[serde(default)]
         branch: String,
+        /// The only event that used to carry no timestamp, which left a blank
+        /// column in the dashboard exactly on the line people look for.
+        /// Defaulted, so rows written by an older relay still deserialise.
+        #[serde(default)]
+        ts: Ts,
     },
     ClaimReleased { session: String, path: String, ts: Ts },
     /// A write that landed on someone else's claim without being stopped —
@@ -313,7 +318,7 @@ impl View {
                     }
                 }
             }
-            Event::ClaimAcquired { session, user, path, lease_until, intent, branch } => {
+            Event::ClaimAcquired { session, user, path, lease_until, intent, branch, .. } => {
                 if let Some(s) = self.sessions.get_mut(session) {
                     s.last_seen = now_ms();
                 }
@@ -590,6 +595,7 @@ mod tests {
                 lease_until,
                 intent: "i".into(),
                 branch: String::new(),
+                ts: now_ms(),
             });
         }
         assert_eq!(v.claims.len(), 1, "same session+path must renew, not duplicate");
@@ -716,6 +722,7 @@ mod tests {
             lease_until: t0 + LEASE_MS,
             intent: "i".into(),
             branch: String::new(),
+            ts: t0,
         });
         assert_eq!(v.claims[0].branch, "feat/discounts");
     }
@@ -916,7 +923,8 @@ mod tests {
             Event::IntentDeclared { session: "s1".into(), text: "auth".into(), ts: t0 + 1 , branch: String::new()},
             Event::ClaimAcquired {
                 session: "s1".into(), user: "a".into(), path: "src/auth.ts".into(),
-                lease_until: now_ms() + LEASE_MS, intent: "auth".into(), branch: String::new(),
+                lease_until: now_ms() + LEASE_MS, intent: "auth".into(),
+                branch: String::new(), ts: t0 + 1,
             },
             Event::SessionStarted { session: "s2".into(), user: "b".into(), branch: "m".into(), ts: t0 + 2 },
             Event::FileWritten { session: "s1".into(), user: "u".into(), path: "src/auth.ts".into(), ts: now_ms() },

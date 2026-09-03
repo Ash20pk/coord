@@ -1,15 +1,47 @@
 # TLS terminates here; the relay listens on loopback only.
 # Websockets need no special config — Caddy proxies the upgrade as-is.
+
+# The public site and the team console. Same binary, same port: the pages are
+# embedded in the relay (include_str!), so there is no second service and no
+# CORS to configure.
+knoot.dev, www.knoot.dev {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:7420 {
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+
+	header {
+		# The pages load three things from elsewhere: three.js from cdnjs and
+		# fonts from Google. Everything else is same-origin, so say so —
+		# `connect-src` covers the relay's own websocket.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' wss://knoot.dev wss://relay.knoot.dev; frame-ancestors 'none'; base-uri 'none'"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		# A token in a URL must never travel to another site in a Referer.
+		X-Frame-Options DENY
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}
+
+# The name teams are already enrolled against. Kept as its own site so an
+# existing `coord login --relay wss://relay.knoot.dev/ws` keeps working.
 relay.knoot.dev {
 	encode zstd gzip
-
-	# The relay authenticates every data route itself (Bearer, or ?token= for
-	# the browser). /  and /lab are static shells that carry no data.
 	reverse_proxy 127.0.0.1:7420 {
 		# A claim acquisition is single-digit ms; a websocket lives for hours.
 		transport http {
 			read_timeout 0
 			write_timeout 0
 		}
+	}
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
 	}
 }
