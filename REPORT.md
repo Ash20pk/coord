@@ -225,7 +225,7 @@ This is the most useful thing to know about the project.
     a snapshot has landed, and the last dial error, and distinguishes a 401
     from unreachable.
 
-Two of these (2 and 6) were caused by fixes to earlier ones. One intermediate
+Three of these (2, 6 and 15) were caused by fixes to earlier ones. One intermediate
 fix — treating a peer's claim as evidence of authorship — suppressed the genuine
 detection case and was reverted; the honest limitation is documented instead.
 
@@ -248,6 +248,14 @@ detection case and was reverted; the honest limitation is documented instead.
     because the original test was written as a race rather than as an
     assertion. The replacement uses a relay double that grants claims and
     never broadcasts, so the window is infinite and every platform sees it.
+
+15. **A fix for 14 logged every arbitrated claim twice.** Recording a grant in
+    the local mirror and appending it to the relay are two different jobs, and
+    the fix did both — so the relay sequenced the claim when it granted it, and
+    the daemon appended it again. The mirror was unharmed, because `View::apply`
+    renews rather than duplicates, which is precisely why nothing misbehaved
+    and nothing caught it. Found by reading the deployed relay's log instead of
+    the green checks above it: seq 3 and seq 4 were the same claim.
 
 Bug 11 is the pattern behind most of this list: a check that reports on the
 thing it can see rather than the thing you asked about. `knoot status` exists

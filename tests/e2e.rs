@@ -1099,3 +1099,43 @@ async fn a_granted_claim_is_in_the_local_mirror_before_the_hook_returns() {
     let edit_denial = hook(&sock, edit(&root, "sessB", "src/auth.ts", "PreToolUse"));
     assert!(edit_denial.is_some(), "a peer's Edit of a claimed file must be blocked too");
 }
+
+/// One granted claim must be one entry in the log.
+///
+/// Recording a grant in the local mirror and appending it to the relay are
+/// two different jobs, and doing both for an arbitrated claim writes it twice:
+/// once by the relay when it granted it, once by the daemon afterwards. The
+/// mirror is unharmed — `View::apply` renews rather than duplicates — so
+/// nothing misbehaves, which is exactly why this needs an assertion. The log
+/// is the audit surface and the dashboard reads it; a claim appearing twice
+/// invites its reader to wonder what happened in between.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_granted_claim_is_logged_exactly_once() {
+    let db = tmp("once").join("relay.db");
+    let addr = knoot::relay::start_with_token("127.0.0.1:0", db.clone(), None).await.unwrap();
+    let url = format!("ws://{addr}/ws");
+    let sock = start_daemon().await;
+    let root = tmp("log-once");
+    init_repo(&root, &url, "e2e-log-once");
+
+    hook(&sock, json!({
+        "hook_event_name": "SessionStart", "session_id": "sessA",
+        "cwd": root.to_string_lossy()
+    }));
+    hook(&sock, edit(&root, "sessA", "src/auth.ts", "PreToolUse"));
+
+    // Let the relay's own broadcast come back too, so a second copy would
+    // have had every chance to land.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE repo = 'local/e2e-log-once' \
+             AND json LIKE '%claim_acquired%' AND json LIKE '%src/auth.ts%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1, "one claim, one log entry — got {n}");
+}

@@ -190,7 +190,7 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                     // Applying it twice is harmless: the relay's copy arrives
                     // shortly and `View::apply` renews a claim on the same
                     // session and path rather than duplicating it.
-                    claim_locally(&rc, &sess_for_warn, &path);
+                    record_claim_locally(&rc, &sess_for_warn, &path);
                     warn_cross_branch(&rc, &sess_for_warn, &path);
                     DResp::Decision { allow: true, reason: None }
                 }
@@ -663,7 +663,8 @@ fn warn_cross_branch(rc: &Arc<RepoConn>, session: &str, path: &str) -> Vec<Claim
 
 /// Optimistically claim locally and tell the relay. Used where we have already
 /// decided to allow the write, so a synchronous round-trip buys nothing.
-fn claim_locally(rc: &Arc<RepoConn>, session: &str, path: &str) {
+/// Build the ClaimAcquired this daemon would record for a session and path.
+fn local_claim_event(rc: &Arc<RepoConn>, session: &str, path: &str) -> Event {
     let (intent, user, branch) = {
         let v = rc.view.lock().unwrap();
         match v.sessions.get(session) {
@@ -671,7 +672,7 @@ fn claim_locally(rc: &Arc<RepoConn>, session: &str, path: &str) {
             None => (String::new(), whoami(), String::new()),
         }
     };
-    let ev = Event::ClaimAcquired {
+    Event::ClaimAcquired {
         session: session.to_string(),
         user,
         path: path.to_string(),
@@ -679,7 +680,27 @@ fn claim_locally(rc: &Arc<RepoConn>, session: &str, path: &str) {
         intent,
         branch,
         ts: now_ms(),
-    };
+    }
+}
+
+/// Record a claim in the local mirror **only**.
+///
+/// For a claim the relay has already granted, it has already sequenced the
+/// event too: appending here as well would write it to the durable log twice.
+/// That is not cosmetic — the log is the audit surface, the dashboard reads it,
+/// and a claim that appears twice invites the reader to wonder what happened
+/// in between.
+fn record_claim_locally(rc: &Arc<RepoConn>, session: &str, path: &str) {
+    let ev = local_claim_event(rc, session, path);
+    rc.view.lock().unwrap().apply(&ev);
+}
+
+/// Record a claim locally *and* tell the relay about it.
+///
+/// For paths the Bash gate takes, which never went through arbitration: the
+/// relay has not heard of them, so somebody has to say so.
+fn claim_locally(rc: &Arc<RepoConn>, session: &str, path: &str) {
+    let ev = local_claim_event(rc, session, path);
     rc.view.lock().unwrap().apply(&ev);
     let _ = rc.tx.send(ClientMsg::Append { event: ev });
 }
