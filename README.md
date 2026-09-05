@@ -1,18 +1,294 @@
 # knoot
 
+**Your team's agents share what they know — and are told when what they know
+has stopped being true.**
+
+A fact one agent worked out reaches the next one on the turn it opens the same
+code, without anyone running a command. A fact names the files it is about, so
+when a colleague changes one of them the fact is flagged *possibly stale* and
+says who moved it. What a session is doing right now reaches every peer in the
+same part of the repo before their paths overlap. And because the same hook sees
+every write, the rare moment two agents do meet on one file is caught before
+git would report it.
+
 **If knoot breaks, your agents do not know.** Every failure path ends in an
 allowed write: relay unreachable, token refused, daemon dead, key missing,
-memory unreadable — the agent is told nothing and carries on. That is the
-distinction from every alternative, it is enforced by tests that fail the build
-if it stops being true, and it is why this can be installed on a repo people
-are actually paid to work in.
+memory unreadable — the agent is told nothing and carries on. That is enforced
+by tests that fail the build if it stops being true, and it is why this can be
+installed on a repo people are actually paid to work in.
 
-What it does when it *is* working: realtime coordination for coding agents. A
-sequenced event log per repo, with claims, leases, and conflict briefs — so
-several Claude Code sessions, a teammate in another editor, and whatever your
-colleague is running can work one repo without stepping on each other. Nothing
-an agent needs to coordinate sits behind a command it has to think of.
+Code never leaves your machine. Only paths, intent sentences, and the facts
+somebody chose to publish cross the wire — and under the `mls` provider the
+relay cannot read even those.
 
+## Shared memory
+
+```sh
+knoot remember --name money --path src/billing.js "all money is integer cents; never floats"
+```
+
+That is the whole interface for the person writing. For the agent reading there
+is no interface at all: on its next turn in `src/billing.js`, or anywhere under
+it, the fact is on its brief.
+
+**This is measured, not hoped.** Four Haiku agents were given a billing task on
+a seeded repo that computed tax in floats. Nothing in the seed, the goal or the
+task list mentioned cents; the one fact above had been placed in memory. It
+reached three of the four unasked, and `billing.js` came out as
+
+```js
+// Invoice calculation. All money values are in integer cents.
+const tax = Math.round(afterDiscount * taxRate);
+```
+
+with `discountCents`, no `parseFloat`, and a passing test called *"Money uses
+cents (no floats)"*. The weakest model in the room changed what it wrote because
+of something a teammate knew. (The same lab found the opposite for anything
+behind a command: agents told outright to run `knoot who` or `knoot plan` did
+not. Memory works because it is pushed.)
+
+### Three kinds, one shape
+
+| | what it is | who writes it | lives |
+|---|---|---|---|
+| **facts** | a durable statement written on purpose — a convention, a decision, a gotcha | a person or agent, `knoot remember` | 90 days, superseded chains kept |
+| **repo_cache** | something derived: where a symbol lives, how the tests run | `knoot cache` | 14 days, **dropped** the moment its files change |
+| **session_context** | what a session is doing now, and what it has settled | the daemon, every turn; `knoot plan` to say more | the session |
+
+```sh
+knoot cache --name "how tests run" --path test.js "node test.js"
+knoot plan --path src/billing.js --decided "cents, not floats" "rewriting the tax rounding"
+knoot recall                                       # what this repo knows
+```
+
+Every kind is scoped to an area of the repo, sealed on the machine that wrote
+it, and carries the person who wrote it — taken from their device key, not from
+what their client says about itself.
+
+### Knowing when a fact has gone wrong
+
+A memory system that knows when a fact was written can tell you it is old. One
+that knows which files it is about can tell you it is **wrong**, and name the
+person who made it so.
+
+Every fact records the paths it is about and a hash of each as it stood. A
+later write to one of those files marks the fact *⚠ possibly stale: priya
+changed src/billing.js since* — unless the file was written back byte for byte,
+in which case nothing was invalidated and the flag stays quiet. Facts are
+flagged and still shown, because a human wrote them on purpose and "who changed
+this" is exactly what the reader needs. Derived knowledge is simply dropped: it
+was mechanical, it is now wrong, and it is cheap to work out again.
+
+Writing the same `--name` again **supersedes** the earlier statement rather
+than standing beside it, so two agents contradicting each other produce one
+current answer and a record of what changed. It is never a dedupe: the case
+that matters is precisely a near-duplicate that says the opposite.
+
+### What a session is doing, without asking it
+
+Nobody has to run anything for `session_context`. Every turn, the daemon
+publishes what a session appears to be doing, composed from the intent it
+declared and the files it holds — both already on the log before the composer
+runs, so nothing new leaves the machine and nothing is summarised. It is marked
+as composed, and reads that way to a peer: *appears to be working on*, not a
+plan they wrote.
+
+`knoot plan` is what a capable agent adds on top. An intent is one line scraped
+from a prompt; a plan says what the approach is and what has already been
+settled, which is what stops a peer designing against work in progress. Once a
+session declares one, the daemon stops composing for it — a scrape must never
+overwrite a plan. Either way it appears at the top of every same-area session's
+next turn, and it is deleted the moment the session ends: a finished plan
+presented as a live one is worse than no plan.
+
+### What is never published
+
+Publishing is **refused**, and the attempt logged, when the text or its source
+file looks like a credential — anything `.gitignore`d, `.env*`, `*.pem`,
+`*.key`, `id_*`, a token prefix this project recognises, or a long unbroken
+key-shaped string. Nothing is derived from a transcript, ever: a free-text
+conclusion pulled out of a turn is an exfiltration path with no reviewer, and
+no amount of care about what gets extracted fixes that.
+
+### Who can read it
+
+Facts are sealed on the machine that writes them, through a key provider. The
+relay chooses, because sealing is a property of the deployment:
+
+- **`plaintext`** (default) stores shards readable. Right for a relay inside
+  your own network, where the box is the trust boundary. An integrity tag still
+  catches a store that swaps or loses rows.
+- **`mls`** (`KNOOT_KEY_PROVIDER=mls` on the relay) makes each room an MLS
+  group (RFC 9420, via OpenMLS). Each machine is a leaf; the key for an area's
+  memory is exported from the group and sent nowhere. The relay is the
+  Delivery Service — it orders handshake messages and can read neither those
+  nor a single shard. Removing someone moves the room to an epoch their laptop
+  cannot derive.
+
+`knoot status` says which provider is in use, and tells you when this machine
+is still waiting for a room's key.
+
+## Nothing sits behind a command
+
+The mechanism under all of this is one hook, fired on every turn, that puts
+onto the agent's context what it would otherwise have to ask for:
+
+- **what your peers are doing** — their plans, declared or composed, with the
+  files they are in and what they have settled
+- **what the team knows** — facts about the files this session has read or
+  claimed, each with its author and any staleness flag
+- **what has already been worked out** — cached answers about those files
+- **what moved under you** — files this session read that a peer has since
+  written, before the next write rather than at merge
+- **who is here** — every session and person on the repo, their branch, and
+  what they hold
+- **mail** — anything a peer or a release notification has for you
+
+Pushed context works on the weakest model; offered context is ignored by it.
+That is the single finding every part of knoot is built on. `knoot who`,
+`knoot recall` and `knoot msg` still exist for people and for capable models,
+and nothing depends on them.
+
+## Quick start
+
+```sh
+cargo build --release            # → target/release/knoot
+
+knoot relay --listen 0.0.0.0:7420   # one shared relay (any box, or localhost)
+knoot daemon                        # one per machine
+cd your-repo && knoot init          # writes .knoot.toml + installs Claude Code hooks
+```
+
+Restart your Claude Code sessions in that repo. Then:
+
+```sh
+knoot who      # who's active, what they're doing, what they hold
+```
+
+On a repo big enough that "everyone" is the wrong audience, divide it into
+areas — the unit of who can collide with whom. A room grants `(repo, area)`
+pairs, and a session is only told about work in the areas its key was granted.
+
+```sh
+knoot areas                                 # what this repo's subtrees are
+knoot areas --import-codeowners --write     # take them from CODEOWNERS
+```
+
+Declaring none is the normal case and means one area, `/`, holding the whole
+repo — exactly how every repo behaved before areas existed.
+
+## When two agents do meet on one file
+
+The same hook that carries memory sees every write, so the case memory is meant
+to prevent is caught when it happens anyway.
+
+```
+agents ──hooks──► knoot hook ──unix socket──► knootd ──websocket──► knoot relay
+ (any terminal)     (shim)                    (local mirror)        (sequencer + arbitration)
+```
+
+- Every turn's writes auto-claim the touched files (10-minute leases, renewed
+  on activity, expired on crash — nothing can wedge the repo).
+- Before an edit, the hook checks the local mirror (microseconds) and acquires
+  through the relay (single-digit ms). A conflict on the **same branch** returns
+  a **conflict brief** — who holds the file, what they are doing, how long is
+  left — into the model's context so it re-plans instead of colliding. On a
+  **different branch** nothing is blocked: the brief says these files will meet
+  at merge, which is a merge conflict predicted hours before git reports it.
+- **A write is also checked against what the agent read.** A file it read and
+  reasoned about, that somebody else has since changed, is reported before the
+  next write — even when the file being written is nobody's. That is the half
+  of a conflict a lock cannot see, and it is advisory.
+- **Creations, deletions and duplicate tasks are reported too.** Two agents
+  creating one new file, a file deleted under someone who had read it, a peer
+  who declared the same task — the collisions a claim on an existing path is
+  blind to.
+- **Widely-shared files are queued, not owned.** A path several sessions want
+  inside half an hour, or one named in `hubs` in `.knoot.toml` such as
+  `package.json`, gets a two-minute lease and a denial that says how many are
+  ahead of you.
+
+In six lab runs with roles assigned, no unforced collision occurred: given
+lanes, agents stay in them. The block exists for the day they do not, and the
+evidence so far is that awareness prevents the collision before the lock has to.
+
+## Working with people, not only agents
+
+Claude Code sessions announce themselves through hooks. Anyone else — a
+teammate in VS Code, an agent under another tool — is invisible unless they say
+so:
+
+```sh
+knoot present --doing "rewriting the tax rounding by hand"
+```
+
+You appear in `knoot who` as a **person**, files you touch are held while you
+are in them, and anything addressed to you prints as it arrives. Agents are
+told something different about you than about each other: a person cannot be
+asked to release a file, so their brief says to pick different work rather than
+to wait.
+
+## Sessions talk to each other
+
+Blocking alone is not multiplayer. A blocked session used to wait on a lease it
+could not observe, and nobody told it when the work finished.
+
+**Release notifications.** Being denied registers interest in that path. When
+the holder releases it — explicitly, by ending, or by its lease expiring — every
+waiter is told, with what the holder was doing. Delivery uses the `Stop` hook:
+the moment an agent tries to end its turn, pending news sends it back to work,
+so notice arrives in real time rather than whenever the human next types. A
+per-user cap means a chatty peer can never keep a session spinning.
+
+**Direct messages.** Agents coordinate in their own words:
+
+```sh
+knoot msg priya "auth.js is yours, exports are stable"
+knoot msg all "goal is green, stop editing"
+knoot inbox                    # read and clear pending notes
+```
+
+Identity comes from `KNOOT_USER` (else `$USER`), not from a session id — Claude
+Code exposes no session id to the commands it runs, and assuming otherwise
+attributed every message to the OS user.
+
+## Why is this file like this?
+
+```sh
+knoot why src/response.js
+```
+
+```
+src/response.js
+    2m ago  sam@example.com set out to: normalise the error shape in response.js
+    2m ago  sam@example.com took it — "normalise the error shape in response.js"
+    2m ago  sam@example.com wrote it
+    1m ago  priya@example.com was blocked; sam@example.com held it
+    1m ago  sam@example.com said: "taking response.js, about 10 min"
+
+what the team knows about it:
+  [facts] error-shape
+    errors are {code, message}; never a bare string
+```
+
+Every event has always been on the log; this reads it back as one file's story
+— the claims, the denials, what people said to each other, and what the team
+has since decided about it.
+
+## Shell writes
+
+Bash is gated too, or the scheme would be optional: agents reach for `sed` and
+heredocs as readily as the Edit tool, and auto mode prefers Bash outright.
+
+`PreToolUse` parses the command for write targets — redirects, heredoc
+targets, `tee`, `sed -i`, `cp`/`mv`, `rm`, `dd of=` — and gates each one.
+Quoting is respected, and heredoc *bodies* are skipped: a body containing
+`(sum, i) => sum + i` would otherwise read `=>` as a redirect.
+
+What the parser cannot read — interpreters, build tools, anything unknown — is
+allowed but *audited*: the working tree is fingerprinted before and after, and
+any change landing on a peer's claim is recorded as `UngatedWrite`. That is
+detection, not prevention, and the dashboard labels it that way.
 
 ## Enrolling a team
 
@@ -42,7 +318,6 @@ coordination is on.
 ```
 
 Anything less than that prints what is wrong and the command that fixes it.
-
 
 ## Hosting it for a team
 
@@ -122,7 +397,6 @@ Litestream reads the write-ahead log, so the relay sets `journal_mode=WAL`
 (with `synchronous=NORMAL`, which keeps a disk flush off the claim path). That
 is asserted by a test: against a rollback-journal database, replication copies
 nothing and reports success.
-
 
 ## knoot.dev
 
@@ -234,172 +508,6 @@ points Vite at an empty env directory. That keeps one project's keys out of
 what `cargo install --git` serves; a self-hosted console simply reports that
 sign-in is not configured, and agent tokens work as usual.
 
-
-## How it works
-
-```
-agents ──hooks──► knoot hook ──unix socket──► knootd ──websocket──► knoot relay
- (any terminal)     (shim)                    (local mirror)        (sequencer + arbitration)
-```
-
-- Every agent turn's writes auto-claim the touched files (10-minute leases,
-  renewed on activity, expired on crash — nothing can wedge the repo).
-- Before any edit, a hook checks the local claim mirror (microseconds) and
-  acquires through the relay (single-digit ms). A conflict returns a
-  **conflict brief** — who holds the file, and their stated intent — straight
-  into the model's context so it re-plans instead of colliding.
-- New sessions are told who else is active and where, at startup.
-- **A write is also checked against what the agent read.** A file it read and
-  reasoned about, that somebody else has since changed, is reported before the
-  next write — even when the file being written is nobody's. That is the half
-  of a conflict a lock cannot see, and it is advisory: the agent re-reads
-  instead of being stopped.
-- **Creations, deletions and duplicate tasks are reported too.** Two agents
-  creating one new file, a file deleted under someone who had read it, a peer
-  who declared the same task a minute ago — the three collisions a claim on an
-  existing path is blind to, and between them a large share of what actually
-  goes wrong when agents share a repo.
-- **Widely-shared files are queued, not owned.** A path three sessions claim
-  inside half an hour — or one named in `hubs` in `.knoot.toml`, such as
-  `package.json` or a shared type file — gets a two-minute lease instead of
-  ten, renewed by writing rather than by being active, and a denial says how
-  many sessions are ahead of you. A hub held for a whole turn is every other
-  agent's critical path.
-- Fail-open everywhere: relay down, daemon dead, network gone → sessions work
-  solo, exactly like today. Code never leaves your machine; only paths and
-  intent strings cross the wire.
-
-## Quick start
-
-```sh
-cargo build --release            # → target/release/knoot
-
-knoot relay --listen 0.0.0.0:7420   # one shared relay (any box, or localhost)
-knoot daemon                        # one per machine
-cd your-repo && knoot init          # writes .knoot.toml + installs Claude Code hooks
-```
-
-Restart your Claude Code sessions in that repo. Then:
-
-```sh
-knoot who      # who's active, what they're doing, what they hold
-```
-
-On a repo big enough that "everyone" is the wrong audience, divide it into
-areas — the unit of who can collide with whom. A room grants `(repo, area)`
-pairs, and a session is only told about work in the areas its key was granted.
-
-```sh
-knoot areas                                 # what this repo's subtrees are
-knoot areas --import-codeowners --write     # take them from CODEOWNERS
-```
-
-Declaring none is the normal case and means one area, `/`, holding the whole
-repo — exactly how every repo behaved before areas existed.
-
-## Working with people, not only agents
-
-Claude Code sessions announce themselves through hooks. Anyone else — a
-teammate in VS Code, an agent under another tool — is invisible unless they say
-so:
-
-```sh
-knoot present --doing "rewriting the tax rounding by hand"
-```
-
-You appear in `knoot who` as a **person**, files you touch are held while you
-are in them, and anything addressed to you prints as it arrives. Agents are
-told something different about you than about each other: a person cannot be
-asked to release a file, so their brief says to pick different work rather than
-to wait.
-
-## Why is this file like this?
-
-```sh
-knoot why src/response.js
-```
-
-```
-src/response.js
-    2m ago  sam@example.com set out to: normalise the error shape in response.js
-    2m ago  sam@example.com took it — "normalise the error shape in response.js"
-    2m ago  sam@example.com wrote it
-    1m ago  priya@example.com was blocked; sam@example.com held it
-    1m ago  sam@example.com said: "taking response.js, about 10 min"
-
-what the team knows about it:
-  [facts] error-shape
-    errors are {code, message}; never a bare string
-```
-
-Every event has always been on the log; this reads it back as one file's story
-— the claims, the denials, what people said to each other, and what the team
-has since decided about it.
-
-## Shared memory
-
-What one agent worked out, the next one is told — on the turn it opens the same
-code, without running a command for it.
-
-```sh
-knoot remember --name money --path src/billing.js "all money is integer cents; never floats"
-knoot plan --path src/billing.js --decided "cents, not floats" "rewriting the tax rounding"
-knoot cache --name "how tests run" --path test.js "node test.js"
-knoot recall                                       # what this repo knows
-```
-
-Three kinds, all scoped to an area and all reaching an agent unasked:
-
-| | what it is | lives |
-|---|---|---|
-| **facts** | a durable statement written on purpose — a convention, a decision, a gotcha | 90 days, superseded chains kept |
-| **repo_cache** | something derived: where a symbol lives, how the tests run | 14 days, **dropped** the moment its files change |
-| **session_context** | what a session is doing now, and what it has settled | the session |
-
-Nobody has to run anything for the third row. Every turn, the daemon publishes
-what a session appears to be doing, composed from the intent it declared and the
-files it holds — a lab run found that agents told outright to publish a plan
-simply did not, so this cannot be a command. It is marked as composed, and reads
-that way to a peer: *appears to be working on*, not a plan they wrote.
-
-`knoot plan` is what a capable agent adds on top, and it is the one worth
-knowing about. An intent is one line scraped from a prompt; a plan says what the
-approach is and what has already been settled, which is what stops a peer
-designing against work in progress. Once a session declares one, the daemon
-stops composing for it — a scrape must never overwrite a plan. Either way it
-appears at the top of every same-area session's next turn.
-
-A fact names the paths it is about, and that is what makes it more than a note:
-a write to one of those files marks the fact *possibly stale* and names who
-changed it, and opening one puts the fact on the agent's brief. Writing the same
-`--name` again supersedes the earlier statement rather than standing beside it,
-so two agents contradicting each other produce one current answer and a record
-of what changed. Every fact carries the person who wrote it, taken from their
-device key rather than from what their client says about itself.
-
-Publishing is **refused**, and the attempt logged, when the text or its source
-file looks like a credential — anything `.gitignore`d, `.env*`, `*.pem`,
-`*.key`, `id_*`, or a token this project recognises. Nothing is ever published
-that an agent did not write on purpose.
-
-Facts are sealed on the machine that writes them, through a key provider. The
-relay chooses, because sealing is a property of the deployment:
-
-- **`plaintext`** (default) stores shards readable. Right for a relay inside
-  your own network, where the box is the trust boundary and "can the vendor
-  read this" was answered by where the box is. An integrity tag still catches
-  a store that swaps or loses rows.
-- **`mls`** (`KNOOT_KEY_PROVIDER=mls` on the relay) makes each room an MLS
-  group (RFC 9420, via OpenMLS). Each machine is a leaf; the key for an area's
-  memory is exported from the group and sent nowhere. The relay is the
-  Delivery Service — it holds key packages and orders handshake messages, and
-  can read neither those nor a single shard. Adding someone is an Add
-  proposal from a member's machine; removing them moves the room to an epoch
-  their laptop cannot derive.
-
-`knoot status` says which provider is in use, and tells you when this machine
-is still waiting for a room's key.
-
 ## Adding people
 
 A team starts with one person, whoever registered it. On a relay attached to
@@ -509,76 +617,6 @@ sqlite3 ~/.knoot/relay.db \
   "SELECT seq, datetime(ts/1000,'unixepoch','localtime'), json FROM events ORDER BY seq;"
 ```
 
-## Report
-
-[REPORT.md](REPORT.md) — current state, live-run results, every bug found by
-running real sessions, and known gaps.
-
-## Status
-
-v1 — shared-tree claims mode. Planned: fleet mode (worktree isolation +
-agent-driven merge queue), semantic claims (symbol-level via tree-sitter),
-dashboard/audit surface over the event log.
-
-## Tests
-
-```sh
-cargo test          # 146 tests, ~4s
-```
-
-Four layers:
-
-| Layer | File | What it protects |
-|---|---|---|
-| Unit | `src/proto.rs` | path-overlap boundaries (`src/auth` vs `src/auth2`), lease expiry, log-replay determinism |
-| Arbitration | `tests/arbitration.rs` | 400+ concurrent races → exactly one winner; conflict briefs carry holder + intent; repo isolation |
-| Failure | `tests/failure.rs` | fail-open on dead daemon, dead relay, unresponsive relay, malformed input; crash recovery via lease expiry |
-| Contract | `tests/e2e.rs` | real Claude Code hook payloads through the binary; exact deny/context JSON; latency ceiling |
-| Multi-tenancy | `tests/teams_api.rs` | registration, token minting/revocation, and that one team cannot read, list, or revoke another's anything |
-| Durability | `tests/failure.rs` | claims and sequence numbers survive a relay restart; the log stays replicable (WAL) |
-
-One test is kept **red on purpose**: `bash_write_to_a_claimed_file_is_blocked`
-(`#[ignore]`d) specifies behaviour v1 does not have. See Known gaps.
-
-## Sessions talk to each other
-
-Blocking alone is not multiplayer. A blocked session used to wait on a lease it
-could not observe, and nobody told it when the work finished.
-
-**Release notifications.** Being denied registers interest in that path. When
-the holder releases it — explicitly, by ending, or by its lease expiring — every
-waiter is told, with what the holder was doing. Delivery uses the `Stop` hook:
-the moment an agent tries to end its turn, pending news sends it back to work,
-so notice arrives in real time rather than whenever the human next types. A
-per-user cap means a chatty peer can never keep a session spinning.
-
-**Direct messages.** Agents coordinate in their own words:
-
-```sh
-knoot msg priya "auth.js is yours, exports are stable"
-knoot msg all "goal is green, stop editing"
-knoot inbox                    # read and clear pending notes
-```
-
-Identity comes from `KNOOT_USER` (else `$USER`), not from a session id — Claude
-Code exposes no session id to the commands it runs, and assuming otherwise
-attributed every message to the OS user.
-
-## Shell writes
-
-Bash is gated too, or the scheme would be optional: agents reach for `sed` and
-heredocs as readily as the Edit tool, and auto mode prefers Bash outright.
-
-`PreToolUse` parses the command for write targets — redirects, heredoc
-targets, `tee`, `sed -i`, `cp`/`mv`, `rm`, `dd of=` — and gates each one.
-Quoting is respected, and heredoc *bodies* are skipped: a body containing
-`(sum, i) => sum + i` would otherwise read `=>` as a redirect.
-
-What the parser cannot read — interpreters, build tools, anything unknown — is
-allowed but *audited*: the working tree is fingerprinted before and after, and
-any change landing on a peer's claim is recorded as `UngatedWrite`. That is
-detection, not prevention, and the dashboard labels it that way.
-
 ## What four agents on one goal actually did
 
 `lab/GOAL.md` gives the lab a shared objective — ship an invoice endpoint, four
@@ -592,6 +630,24 @@ accident. Two runs, unprompted behaviour:
   collision was avoided *before* the block, which is the better outcome and the
   reason that run recorded no denials at all.
 - The tree ended green: `node test.js`, 57–58 passing.
+
+## Tests
+
+```sh
+cargo test          # 281 tests, ~15s
+```
+
+| Layer | File | What it protects |
+|---|---|---|
+| Unit | `src/proto.rs`, `src/memory.rs` | path-overlap boundaries, lease expiry, log-replay determinism, staleness and supersession |
+| Memory | `tests/memory.rs` | a fact reaches a peer on the next turn unasked; scoped fetch by id; contradiction is a supersession; a `.env` is refused; a composed context never replaces a declared plan |
+| Encryption | `tests/mls.rs` | a relay dump yields no plaintext, no secret and no working credential; a removed device cannot derive the next epoch |
+| Awareness | `tests/awareness.rs`, `tests/areas.rs` | stale reads, creation collisions, deletions, hubs; one area's events never reach a session outside it |
+| Arbitration | `tests/arbitration.rs` | 400+ concurrent races → exactly one winner; conflict briefs carry holder + intent; repo isolation |
+| Failure | `tests/failure.rs` | fail-open on dead daemon, dead relay, unresponsive relay, malformed input; crash recovery via lease expiry |
+| Contract | `tests/e2e.rs` | real Claude Code hook payloads through the binary; exact deny/context JSON; latency ceiling |
+| Multi-tenancy | `tests/teams_api.rs` | registration, token minting/revocation, and that one team cannot read, list, or revoke another's anything |
+| Durability | `tests/failure.rs` | claims and sequence numbers survive a relay restart; the log stays replicable (WAL) |
 
 ## Known gaps
 
@@ -613,3 +669,14 @@ to re-plan. Live runs say yes so far — one session prepared its patch and
 waited rather than writing; another, seeing a peer mid-rename, wrote its
 function and flagged that the peer's rename would need to cover it. Neither
 attempted a shell bypass. Small N.
+
+## Where this is going
+
+[REPORT.md](REPORT.md) says what is true of the code and every bug found by
+running real sessions. [GAPS.md](GAPS.md) says what would make it the best in
+its category, with each gap's evidence and what closed it. [DEMAND.md](DEMAND.md)
+asks whether anyone wants it, and answers honestly. [MULTIPLAYER.md](MULTIPLAYER.md)
+is the design of areas, rooms, memory and encryption, with its sources.
+
+Not planned, on purpose: fleet mode, merge queues, a model in the arbiter, or
+symbol-level claims until the log shows file-level is what bites.
