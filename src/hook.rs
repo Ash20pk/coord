@@ -1,6 +1,30 @@
-//! The shim Claude Code invokes via hooks. Reads the hook payload on stdin,
-//! consults the local daemon over the unix socket, and answers in the hook
-//! output format. Every failure path exits 0 with no output: fail open.
+//! The shim a coding agent invokes via hooks. Reads the hook payload on
+//! stdin, consults the local daemon over the unix socket, and answers in the
+//! hook output format. Every failure path exits 0 with no output: fail open.
+//!
+//! Two agents speak this surface natively — Claude Code and Codex — and the
+//! shim is the *only* place that knows which is which. Both send the same
+//! envelope (`hook_event_name`, `session_id`, `cwd`, `tool_name`,
+//! `tool_input`, `prompt`, `stop_hook_active`) and accept the same output
+//! contract (`hookSpecificOutput` with a `hookEventName`, `permissionDecision:
+//! deny` with a reason, `decision: block` on `Stop`). They differ in what a
+//! file edit looks like:
+//!
+//! * Claude Code edits with `Write`/`Edit`/`MultiEdit`/`NotebookEdit`, one
+//!   `file_path` each, and reads with `Read`.
+//! * Codex edits with one tool, `apply_patch`, whose `tool_input.command` is
+//!   a whole patch that may add, update, move and delete several files; it
+//!   has no read tool and reads through the shell.
+//!
+//! So a Codex patch becomes one batched write check, and shell reads are
+//! recorded for both. Nothing else differs, and nothing here reads
+//! `transcript_path`, `tool_response`, or the body of a patch — see "What
+//! crosses the wire" in the README for what does leave the machine.
+//!
+//! Which agent is calling is stated on the command line (`knoot hook --agent
+//! codex`, as `knoot init` installs it) and, failing that, inferred from the
+//! payload. An explicit flag wins because inference is a heuristic and the
+//! installed configuration is not.
 
 use crate::config;
 use crate::daemon;
@@ -10,17 +34,56 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-pub fn run() {
-    // Any panic or error must never block the agent.
-    let _ = std::panic::catch_unwind(inner);
+/// The coding agent on the other end of the hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agent {
+    ClaudeCode,
+    Codex,
 }
 
-fn inner() {
+impl Agent {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "claude" | "claude-code" | "claudecode" => Some(Agent::ClaudeCode),
+            "codex" => Some(Agent::Codex),
+            _ => None,
+        }
+    }
+
+    /// Which agent sent this payload, when nobody said. Codex is the one with
+    /// distinctive marks — `apply_patch` as a tool name, or the `turn_id`
+    /// Codex puts on every turn-scoped event — so it is recognised and
+    /// Claude Code is the default, because Claude Code's payload has nothing
+    /// in it that Codex's lacks.
+    pub fn infer(v: &Value) -> Self {
+        let tool = v["tool_name"].as_str().unwrap_or("");
+        if tool == "apply_patch" || v.get("turn_id").is_some() || v.get("matcher_aliases").is_some() {
+            Agent::Codex
+        } else {
+            Agent::ClaudeCode
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Agent::ClaudeCode => "claude",
+            Agent::Codex => "codex",
+        }
+    }
+}
+
+pub fn run(agent: Option<Agent>) {
+    // Any panic or error must never block the agent.
+    let _ = std::panic::catch_unwind(move || inner(agent));
+}
+
+fn inner(agent: Option<Agent>) {
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {
         return;
     }
     let Ok(v) = serde_json::from_str::<Value>(&input) else { return };
+    let agent = agent.unwrap_or_else(|| Agent::infer(&v));
     let event = v["hook_event_name"].as_str().unwrap_or("");
     let session = v["session_id"].as_str().unwrap_or("").to_string();
     let cwd = v["cwd"].as_str().unwrap_or(".").to_string();
@@ -30,6 +93,28 @@ fn inner() {
 
     let tool = v["tool_name"].as_str().unwrap_or("");
     let req = match event {
+        // Codex's one editing tool. The payload is the patch itself; only the
+        // paths and the kind of each operation leave this function. Several
+        // files are checked as a unit so a denial on one leaves no claim on
+        // the others.
+        "PreToolUse" | "PostToolUse" if tool == "apply_patch" => {
+            let patch = v["tool_input"]["command"].as_str().unwrap_or("");
+            let ops = crate::patch::ops(patch);
+            if ops.is_empty() {
+                return;
+            }
+            let writes: Vec<(String, bool)> = ops.iter().flat_map(|o| o.writes()).collect();
+            if event == "PreToolUse" {
+                let removals: Vec<(String, bool)> = ops.iter().filter_map(|o| o.removal()).collect();
+                DReq::PreWriteBatch { repo_root, session, writes, removals }
+            } else {
+                DReq::PostWriteBatch {
+                    repo_root,
+                    session,
+                    paths: writes.into_iter().map(|(p, _)| p).collect(),
+                }
+            }
+        }
         "PreToolUse" | "PostToolUse" if tool == "Bash" => {
             // Shell writes must be gated too, or the whole scheme is optional:
             // agents reach for sed/heredocs as readily as the Edit tool.
@@ -90,6 +175,10 @@ fn inner() {
         },
         _ => return,
     };
+
+    // The agent decides nothing below this line: both speak one output
+    // contract. It is kept so the one place it might matter is obvious.
+    let _ = agent.label();
 
     let Some(resp) = call_daemon(&req) else { return };
 

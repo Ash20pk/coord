@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use config::RepoConfig;
 use proto::{now_ms, DReq, DResp};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "knoot", version, about = "Realtime coordination for coding agents")]
@@ -34,8 +34,13 @@ enum Cmd {
     },
     /// Run the local daemon (claim mirror + hot-path checks)
     Daemon,
-    /// Hook shim invoked by Claude Code (reads hook JSON on stdin)
-    Hook,
+    /// Hook shim invoked by a coding agent (reads hook JSON on stdin)
+    Hook {
+        /// Which agent is calling: `claude` or `codex`. Inferred from the
+        /// payload when omitted; `knoot init` always writes it.
+        #[arg(long)]
+        agent: Option<String>,
+    },
     /// Enable knoot in the current repo: write .knoot.toml and install hooks
     Init {
         #[arg(long, default_value = "ws://127.0.0.1:7420/ws")]
@@ -43,6 +48,9 @@ enum Cmd {
         /// Repo identifier shared by all collaborators (default: derived from git remote or path)
         #[arg(long)]
         repo: Option<String>,
+        /// Which agents to install hooks for: `claude`, `codex`, or `all`
+        #[arg(long, default_value = "all")]
+        agent: String,
     },
     /// Store the token for a relay (kept in ~/.knoot/credentials.toml, not in
     /// the repo — .knoot.toml is committed and must never carry a secret)
@@ -234,11 +242,13 @@ async fn main() -> Result<()> {
         Cmd::Recall { query } => recall(query.join(" ")),
         Cmd::Why { path, limit, relay } => why(path, limit, relay).await,
         Cmd::Daemon => daemon::run().await,
-        Cmd::Hook => {
-            hook::run();
+        Cmd::Hook { agent } => {
+            // An unrecognised name is not an error: the hook must never fail
+            // closed over its own flag. It falls back to inference.
+            hook::run(agent.as_deref().and_then(hook::Agent::parse));
             Ok(())
         }
-        Cmd::Init { relay, repo } => init(relay, repo),
+        Cmd::Init { relay, repo, agent } => init(relay, repo, &agent),
         Cmd::Login { relay, token } => login(relay, token),
         Cmd::Join { key, relay } => join(key, relay).await,
         Cmd::Status => status(),
@@ -293,6 +303,11 @@ fn derive_repo_id(root: &std::path::Path) -> String {
 /// `init` repairs a committed config instead of appending a second entry.
 fn is_knoot_hook(cmd: &str) -> bool {
     let cmd = cmd.trim();
+    // `knoot hook`, or `knoot hook --agent codex`.
+    let cmd = match cmd.find(" hook --agent ") {
+        Some(i) => &cmd[..i + " hook".len()],
+        None => cmd,
+    };
     if !cmd.ends_with(" hook") {
         return false;
     }
@@ -302,47 +317,115 @@ fn is_knoot_hook(cmd: &str) -> bool {
         || prog.rsplit('/').next() == Some("knoot")
 }
 
-fn init(relay: String, repo: Option<String>) -> Result<()> {
+fn init(relay: String, repo: Option<String>, agent: &str) -> Result<()> {
     let root = repo_root_here();
     let repo_id = repo.unwrap_or_else(|| derive_repo_id(&root));
     RepoConfig { relay: relay.clone(), repo: repo_id.clone(), hubs: Vec::new(), areas: Vec::new() }.save(&root)?;
 
-    // Install hooks into <root>/.claude/settings.json (merge, don't clobber).
-    //
-    // The command must resolve on *every* teammate's machine, because this
-    // file is committed — that is the whole onboarding story. Writing
-    // `current_exe()` here bakes in the path of whoever ran `init`
-    // (`/Users/someone/knoot/target/release/knoot`), which does not exist for
-    // anyone else: their hooks fail, knoot fails open, and it silently does
-    // nothing for the whole team while looking fine to the person who set it
-    // up. So: resolve `knoot` from PATH, with KNOOT_BIN as the escape hatch
-    // for anyone who keeps it somewhere unusual.
-    let hook_cmd = "${KNOOT_BIN:-knoot} hook".to_string();
-    let settings_path = root.join(".claude/settings.json");
-    std::fs::create_dir_all(settings_path.parent().unwrap())?;
-    let mut settings: Value = std::fs::read_to_string(&settings_path)
+    let agents: Vec<hook::Agent> = match agent.trim().to_ascii_lowercase().as_str() {
+        "all" | "both" | "" => vec![hook::Agent::ClaudeCode, hook::Agent::Codex],
+        other => vec![hook::Agent::parse(other).with_context(|| {
+            format!("unknown agent `{other}` — expected `claude`, `codex` or `all`")
+        })?],
+    };
+
+    let mut written = Vec::new();
+    for a in &agents {
+        written.push(match a {
+            hook::Agent::ClaudeCode => install_claude_hooks(&root)?,
+            hook::Agent::Codex => install_codex_hooks(&root)?,
+        });
+    }
+
+    println!("knoot enabled for {}", root.display());
+    println!("  repo id : {repo_id}");
+    println!("  relay   : {relay}");
+    for (a, path) in agents.iter().zip(&written) {
+        println!("  hooks   : {:<6} {}", a.label(), path.display());
+    }
+    // Say it here rather than letting someone discover it from silence.
+    if which_knoot().is_none() {
+        println!(
+            "\nwarning: `knoot` is not on PATH. The hooks just written call it by name so they \
+             work for everyone who clones this repo — install the binary on PATH, or set \
+             KNOOT_BIN to its location."
+        );
+    }
+    println!("\nNext steps:");
+    println!("  1. start a relay somewhere shared:   knoot relay --listen 0.0.0.0:7420");
+    println!("  2. start the local daemon:           knoot daemon");
+    println!("  3. restart agent sessions in this repo — they now coordinate.");
+    if agents.contains(&hook::Agent::Codex) {
+        println!("     Codex asks you to trust a repo's hooks once: run /hooks inside Codex and trust them.");
+    }
+    let files: Vec<String> = written.iter().map(|p| {
+        p.strip_prefix(&root).unwrap_or(p).to_string_lossy().to_string()
+    }).collect();
+    println!("  4. commit .knoot.toml and {} — teammates who clone are enrolled.", files.join(" and "));
+    println!("     Each of them needs the binary on PATH, `knoot daemon`, and, on a hosted");
+    println!("     relay, `knoot login`.");
+    Ok(())
+}
+
+/// The events knoot listens on, and the tool matcher for the two that have
+/// one. Shared by both agents' configurations because both agents fire the
+/// same events; only the matcher's tool names differ.
+const HOOK_EVENTS: &[(&str, bool)] = &[
+    ("PreToolUse", true),
+    ("PostToolUse", true),
+    ("SessionStart", false),
+    ("UserPromptSubmit", false),
+    ("SessionEnd", false),
+    ("Stop", false),
+];
+
+/// Install hooks into `<root>/.claude/settings.json` (merge, don't clobber).
+///
+/// The command must resolve on *every* teammate's machine, because this file
+/// is committed — that is the whole onboarding story. Writing `current_exe()`
+/// here bakes in the path of whoever ran `init`
+/// (`/Users/someone/knoot/target/release/knoot`), which does not exist for
+/// anyone else: their hooks fail, knoot fails open, and it silently does
+/// nothing for the whole team while looking fine to the person who set it up.
+/// So: resolve `knoot` from PATH, with KNOOT_BIN as the escape hatch for
+/// anyone who keeps it somewhere unusual.
+fn install_claude_hooks(root: &Path) -> Result<PathBuf> {
+    let path = root.join(".claude/settings.json");
+    install_hooks_json(&path, "${KNOOT_BIN:-knoot} hook --agent claude", "Write|Edit|MultiEdit|NotebookEdit|Bash")?;
+    Ok(path)
+}
+
+/// Install hooks into `<root>/.codex/hooks.json`, the same shape under the
+/// same `hooks` key. Codex serialises file edits as `apply_patch` and the
+/// shell as `Bash`; `Write|Edit` are accepted as matcher aliases but the
+/// canonical name is what the payload carries, so it is what we match.
+///
+/// Codex runs hook commands through a shell, so `${KNOOT_BIN:-knoot}` expands
+/// there as it does for Claude Code. Non-managed hooks need the user to trust
+/// them once (`/hooks` inside Codex); `init` says so.
+fn install_codex_hooks(root: &Path) -> Result<PathBuf> {
+    let path = root.join(".codex/hooks.json");
+    install_hooks_json(&path, "${KNOOT_BIN:-knoot} hook --agent codex", "Bash|apply_patch")?;
+    Ok(path)
+}
+
+fn install_hooks_json(path: &Path, hook_cmd: &str, matcher: &str) -> Result<()> {
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let mut settings: Value = std::fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_else(|| json!({}));
 
     let hooks = settings
         .as_object_mut()
-        .context("settings.json is not an object")?
+        .with_context(|| format!("{} is not a JSON object", path.display()))?
         .entry("hooks")
         .or_insert_with(|| json!({}));
 
-    let entries: &[(&str, Option<&str>)] = &[
-        ("PreToolUse", Some("Write|Edit|MultiEdit|NotebookEdit|Bash")),
-        ("PostToolUse", Some("Write|Edit|MultiEdit|NotebookEdit|Bash")),
-        ("SessionStart", None),
-        ("UserPromptSubmit", None),
-        ("SessionEnd", None),
-        ("Stop", None),
-    ];
-    for (event, matcher) in entries {
+    for (event, has_matcher) in HOOK_EVENTS {
         let arr = hooks
             .as_object_mut()
-            .unwrap()
+            .with_context(|| format!("`hooks` in {} is not an object", path.display()))?
             .entry(*event)
             .or_insert_with(|| json!([]));
         let arr = arr.as_array_mut().context("hook entry not an array")?;
@@ -355,32 +438,12 @@ fn init(relay: String, repo: Option<String>) -> Result<()> {
                 .unwrap_or(false)
         });
         let mut group = json!({ "hooks": [{ "type": "command", "command": hook_cmd }] });
-        if let Some(m) = matcher {
-            group["matcher"] = json!(m);
+        if *has_matcher {
+            group["matcher"] = json!(matcher);
         }
         arr.push(group);
     }
-    std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
-
-    println!("knoot enabled for {}", root.display());
-    println!("  repo id : {repo_id}");
-    println!("  relay   : {relay}");
-    println!("  hooks   : {}", settings_path.display());
-    // Say it here rather than letting someone discover it from silence.
-    if which_knoot().is_none() {
-        println!(
-            "\nwarning: `knoot` is not on PATH. The hooks just written call it by name so they \
-             work for everyone who clones this repo — install the binary on PATH, or set \
-             KNOOT_BIN to its location."
-        );
-    }
-    println!("\nNext steps:");
-    println!("  1. start a relay somewhere shared:   knoot relay --listen 0.0.0.0:7420");
-    println!("  2. start the local daemon:           knoot daemon");
-    println!("  3. restart Claude Code sessions in this repo — they now coordinate.");
-    println!("  4. commit .knoot.toml and .claude/settings.json — teammates who clone are enrolled.");
-    println!("     Each of them needs the binary on PATH, `knoot daemon`, and, on a hosted");
-    println!("     relay, `knoot login`.");
+    std::fs::write(path, serde_json::to_string_pretty(&settings)?)?;
     Ok(())
 }
 
@@ -614,37 +677,47 @@ fn status() -> Result<()> {
         }
     }
 
-    // 3. hooks: installed, and calling something that exists
+    // 3. hooks: installed for at least one agent, and calling something that
+    //    exists. One line per agent, so a repo enrolled for Claude Code but
+    //    not Codex says so rather than reading as fully enrolled.
     if let Some(r) = &root {
-        let path = r.join(".claude/settings.json");
-        let settings: Option<Value> =
-            std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok());
-        let cmds: Vec<String> = settings
-            .iter()
-            .filter_map(|s| s["hooks"].as_object())
-            .flat_map(|h| h.values())
-            .filter_map(|v| v.as_array())
-            .flatten()
-            .filter_map(|g| g["hooks"].as_array())
-            .flatten()
-            .filter_map(|h| h["command"].as_str())
-            .filter(|c| is_knoot_hook(c))
-            .map(str::to_string)
-            .collect();
-        let events = cmds.len();
-        // An absolute path here is the bug that broke every teammate: it
-        // resolves for whoever ran `init` and for nobody else.
-        let absolute: Vec<&String> = cmds.iter().filter(|c| c.starts_with('/')).collect();
-        if events == 0 {
-            println!("[FAIL] hooks     not installed — run `knoot init`");
+        let mut any = false;
+        for (label, rel) in [("claude", ".claude/settings.json"), ("codex", ".codex/hooks.json")] {
+            let path = r.join(rel);
+            let settings: Option<Value> =
+                std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok());
+            let cmds: Vec<String> = settings
+                .iter()
+                .filter_map(|s| s["hooks"].as_object())
+                .flat_map(|h| h.values())
+                .filter_map(|v| v.as_array())
+                .flatten()
+                .filter_map(|g| g["hooks"].as_array())
+                .flatten()
+                .filter_map(|h| h["command"].as_str())
+                .filter(|c| is_knoot_hook(c))
+                .map(str::to_string)
+                .collect();
+            let events = cmds.len();
+            // An absolute path here is the bug that broke every teammate: it
+            // resolves for whoever ran `init` and for nobody else.
+            let absolute: Vec<&String> = cmds.iter().filter(|c| c.starts_with('/')).collect();
+            if events == 0 {
+                println!("[    ] hooks     {label:<6} not installed ({rel})");
+            } else if let Some(a) = absolute.first() {
+                any = true;
+                println!("[WARN] hooks     {label:<6} {events} events, but hardcoded to a local path:");
+                println!("                 {a}");
+                println!("                 that path will not exist for teammates who clone this repo");
+                problems.push("re-run `knoot init` to write a PATH-resolved hook command".into());
+            } else {
+                any = true;
+                println!("[ok  ] hooks     {label:<6} {events} events, resolved from PATH");
+            }
+        }
+        if !any {
+            println!("[FAIL] hooks     not installed for any agent — run `knoot init`");
             problems.push("run `knoot init` to install hooks".into());
-        } else if let Some(a) = absolute.first() {
-            println!("[WARN] hooks     {events} events, but hardcoded to a local path:");
-            println!("                 {a}");
-            println!("                 that path will not exist for teammates who clone this repo");
-            problems.push("re-run `knoot init` to write a PATH-resolved hook command".into());
-        } else {
-            println!("[ok  ] hooks     {events} events, resolved from PATH");
         }
     }
 

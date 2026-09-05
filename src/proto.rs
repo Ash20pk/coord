@@ -936,6 +936,29 @@ pub enum DReq {
     /// the file it is writing is untouched.
     FileRead { repo_root: String, session: String, path: String },
     PostWrite { repo_root: String, session: String, path: String },
+    /// Several files about to be written by one tool call — Codex's
+    /// `apply_patch` edits, creates, moves and deletes in a single envelope.
+    ///
+    /// Checked as one unit: every path is tested against the mirror before
+    /// any is claimed, so a patch denied on its third file leaves no claims
+    /// standing on its first two. Gated the way a shell command's targets are
+    /// — a local check and a local claim — which is what a hook can afford
+    /// for several paths at once.
+    ///
+    /// `writes` is each path with whether it is being *created*; `removals`
+    /// is each path the patch makes stop existing, and whether by a move.
+    /// Removals are announced after the fact from `PostWriteBatch`, once the
+    /// path is actually gone — a patch that failed deleted nothing.
+    PreWriteBatch {
+        repo_root: String,
+        session: String,
+        #[serde(default)]
+        writes: Vec<(String, bool)>,
+        #[serde(default)]
+        removals: Vec<(String, bool)>,
+    },
+    /// The tool call behind a `PreWriteBatch` has run.
+    PostWriteBatch { repo_root: String, session: String, #[serde(default)] paths: Vec<String> },
     SessionStart { repo_root: String, session: String, user: String, branch: String },
     Intent { repo_root: String, session: String, text: String, user: String, #[serde(default)] branch: String },
     SessionEnd { repo_root: String, session: String },

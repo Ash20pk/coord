@@ -21,6 +21,17 @@ pub struct Analysis {
     /// claim on a file that is gone" is not a state anyone can act on. Kept
     /// separately so the daemon can announce them once they have happened.
     pub removals: Vec<(String, bool)>,
+    /// Paths this command is expected to *read*, as written on the command
+    /// line. Advisory and never gated: a read is not a write. It is the other
+    /// half of a conflict — a write is stale when what the agent read has
+    /// since changed — and an agent that reads through the shell (Codex has
+    /// no Read tool; Claude Code in auto mode prefers `cat` and `sed -n`)
+    /// would otherwise have no reads on record at all.
+    ///
+    /// Conservative on purpose: only commands whose file arguments are
+    /// unambiguous. A path guessed wrong here costs one spurious "you read
+    /// this" note, so it is kept to forms where the guess is not a guess.
+    pub reads: Vec<String>,
 }
 
 /// Commands that cannot modify the working tree.
@@ -236,7 +247,8 @@ fn base(cmd: &str) -> &str {
 
 pub fn analyze(cmd: &str) -> Analysis {
     let (toks, saw_subst) = lex(cmd);
-    let mut out = Analysis { targets: Vec::new(), audit: saw_subst, removals: Vec::new() };
+    let mut out =
+        Analysis { targets: Vec::new(), audit: saw_subst, removals: Vec::new(), reads: Vec::new() };
 
     // Split into command segments at separators.
     for seg in toks.split(|t| matches!(t, Tok::Sep)) {
@@ -273,6 +285,11 @@ pub fn analyze(cmd: &str) -> Analysis {
     out.targets.dedup();
     out.removals.sort();
     out.removals.dedup();
+    out.reads.sort();
+    out.reads.dedup();
+    // A path the command writes is not also a read of it: `sed -i` names the
+    // file once and the write is the fact that matters.
+    out.reads.retain(|r| !out.targets.contains(r));
     out
 }
 
@@ -284,7 +301,16 @@ fn analyze_command(name: &str, args: &[&str], out: &mut Analysis) {
     match name {
         "tee" => out.targets.extend(files(args)),
         "sed" | "gsed" | "perl-sed" => {
-            // Only -i (in place) writes. BSD sed takes -i ''.
+            // Only -i (in place) writes. BSD sed takes -i ''. Without it, sed
+            // reads every file after the script — `sed -n '1,40p' src/x.rs`
+            // is how an agent without a Read tool reads a file.
+            if !args.iter().any(|a| *a == "-i" || a.starts_with("-i")) {
+                let mut cands = files(args);
+                if !cands.is_empty() && !args.iter().any(|a| *a == "-e" || *a == "-f") {
+                    cands.remove(0); // the script
+                }
+                out.reads.extend(cands.into_iter().filter(|c| looks_like_path(c)));
+            }
             if args.iter().any(|a| *a == "-i" || a.starts_with("-i")) {
                 // Drop the script and any empty backup suffix; the rest are files.
                 let mut cands = files(args);
@@ -357,6 +383,20 @@ fn analyze_command(name: &str, args: &[&str], out: &mut Analysis) {
                 _ => {}
             }
         }
+        // Commands whose every non-flag argument is a file they read.
+        "cat" | "bat" | "head" | "tail" | "less" | "more" | "nl" | "wc" | "file" | "stat"
+        | "column" | "rev" | "diff" | "cmp" | "shasum" | "md5sum" | "sha256sum" => {
+            out.reads.extend(files(args).into_iter().filter(|c| looks_like_path(c)));
+        }
+        // Pattern first, then files. `grep -n foo src/` reads a directory,
+        // which is a read of everything under it as far as staleness goes.
+        "grep" | "egrep" | "fgrep" | "rg" | "ag" | "ack" | "jq" | "yq" => {
+            let mut cands = files(args);
+            if !cands.is_empty() && !args.iter().any(|a| *a == "-e" || *a == "-f") {
+                cands.remove(0); // the pattern
+            }
+            out.reads.extend(cands.into_iter().filter(|c| looks_like_path(c)));
+        }
         _ => {
             if OPAQUE.contains(&name) {
                 out.audit = true;
@@ -365,6 +405,18 @@ fn analyze_command(name: &str, args: &[&str], out: &mut Analysis) {
             }
         }
     }
+}
+
+/// Whether a bare argument is plausibly a file rather than a number, a
+/// pattern or a word. `head -n 40 src/x.rs` has `40` as a non-flag argument;
+/// `grep foo src/` has `foo`. The bar: it contains a path separator or a
+/// dot-extension, or names a file that exists relative to the cwd. This is a
+/// read, so a miss costs one advisory note and never a block.
+fn looks_like_path(s: &str) -> bool {
+    if s.is_empty() || s == "-" || s.chars().all(|c| c.is_ascii_digit() || c == ',') {
+        return false;
+    }
+    s.contains('/') || s.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && !ext.is_empty() && ext.len() <= 12 && ext.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 
 #[cfg(test)]
@@ -402,6 +454,33 @@ mod tests {
         assert_eq!(removals("git mv src/a.js src/b.js"), vec![("src/a.js".to_string(), true)]);
         assert!(t("git mv src/a.js src/b.js").contains(&"src/b.js".to_string()));
         assert!(!removals("git rm src/old.js").iter().any(|(p, _)| p == "rm"));
+    }
+
+    fn reads(cmd: &str) -> Vec<String> {
+        analyze(cmd).reads
+    }
+
+    /// An agent with no Read tool reads through the shell, and a write is
+    /// stale when what it read has changed — so those reads have to exist.
+    #[test]
+    fn reading_through_the_shell_is_recorded_as_a_read() {
+        assert_eq!(reads("cat src/a.rs"), vec!["src/a.rs"]);
+        assert_eq!(reads("sed -n '1,40p' src/a.rs"), vec!["src/a.rs"]);
+        assert_eq!(reads("head -n 40 src/a.rs"), vec!["src/a.rs"]);
+        assert_eq!(reads("grep -n foo src/a.rs src/b.rs"), vec!["src/a.rs", "src/b.rs"]);
+        assert_eq!(reads("rg TODO src/"), vec!["src/"]);
+        assert_eq!(reads("cat src/a.rs | grep x"), vec!["src/a.rs"]);
+    }
+
+    /// A number, a pattern or a word is not a file, and a written file is not
+    /// also a read: the write is the fact that matters.
+    #[test]
+    fn a_shell_read_never_invents_a_file() {
+        assert!(reads("head -n 40").is_empty());
+        assert!(reads("grep foo").is_empty());
+        assert!(reads("sed -i '' s/a/b/ src/c.js").is_empty());
+        assert!(reads("echo hi > src/b.js").is_empty());
+        assert!(!reads("sed -n 1,5p src/a.rs").contains(&"1,5p".to_string()));
     }
 
     #[test]

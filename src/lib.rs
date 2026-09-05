@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod hook;
 pub mod memory;
 pub mod mls;
+pub mod patch;
 pub mod proto;
 pub mod relay;
 pub mod rooms;

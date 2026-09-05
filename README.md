@@ -149,6 +149,78 @@ That is the single finding every part of knoot is built on. `knoot who`,
 `knoot recall` and `knoot msg` still exist for people and for capable models,
 and nothing depends on them.
 
+## Agents
+
+Two agents speak knoot's hook surface natively, with no MCP server and no
+tool the model has to think to call:
+
+| | edits | reads | hooks file |
+|---|---|---|---|
+| **Claude Code** | `Write` / `Edit` / `MultiEdit` / `NotebookEdit` | `Read` | `.claude/settings.json` |
+| **Codex** | `apply_patch` — one patch, several files | the shell | `.codex/hooks.json` |
+
+`knoot init` writes both files, committed alongside `.knoot.toml`, so a clone
+is enrolled for whichever agent the person who cloned it runs. Codex asks you
+to trust a repository's hooks once — `/hooks` inside Codex — and `init` says
+so. `knoot init --agent codex` or `--agent claude` writes one.
+
+The two are one room. A Codex session holds a file through a patch and a
+Claude Code session is denied it with the same brief — holder, intent, lease.
+A fact one wrote reaches the other on its next turn. A Claude Code session's
+plan appears at the top of a Codex session's next prompt.
+
+Three things had to be true of the Codex adapter that were free with Claude
+Code:
+
+- **A patch is checked as a unit.** One `apply_patch` may add, edit, move and
+  delete several files. Every path is tested against the mirror before any is
+  claimed, so a patch denied on its third file leaves no claim standing on its
+  first two — and `knoot why` never shows a session holding files it never
+  wrote.
+- **Deletions are announced once they have happened.** A patch that deletes
+  a file is recorded as a write before and as a removal after, and only if the
+  path is really gone: a patch that failed deleted nothing.
+- **Reads through the shell count.** Codex has no read tool; it runs `cat`,
+  `sed -n`, `grep`. A write is stale when what the agent read has since
+  changed, so those reads are parsed out of the command before it runs and
+  recorded — for Claude Code too, where auto mode prefers the shell. Only
+  paths that exist in the repo are recorded, and a read is advisory; it never
+  denies anything.
+
+Which agent is calling is stated on the installed command line (`knoot hook
+--agent codex`) and, failing that, inferred from the payload — Codex's carries
+`turn_id` and `apply_patch`, Claude Code's carries neither. Everything below
+the shim is identical: one daemon, one relay protocol, one log. Adding a third
+agent is a matcher, a payload shape, and a test file.
+
+## What crosses the wire
+
+The rule is that **code never leaves your machine**. The relay sequences and
+stores what it is given; it should never be given anything worth stealing.
+What it is given, exhaustively — every field on every event and message in
+`src/proto.rs`:
+
+| leaves the machine | never leaves |
+|---|---|
+| repo-relative **paths** of files claimed, written, read-and-gone, created or removed | file **contents**, in any form |
+| the **repo id** (derived from the `origin` URL) and the **branch** name | diffs, patch hunks, `Write` bodies |
+| **session ids**, and the **person** behind them (from the device key) | shell **commands** — parsed locally; only the paths they touch are sent |
+| an **intent**: the first 160 characters of each prompt | tool **output** (`tool_response`) — never read |
+| **messages** sent with `knoot msg`, in your own words | the **transcript** — Codex sends its path; knoot never opens it |
+| **facts, plans and cache entries** somebody chose to publish — sealed on your machine, unreadable to the relay under `mls` | what a session *read* — kept in the daemon, never sent |
+| a SHA-256 of each file a fact names, inside the sealed shard | which lines changed, or how many |
+
+Two of those deserve a second look. The **intent** is prompt text: if someone
+pastes a stack trace into their first line, its first 160 characters reach
+peers. That is the one field that carries what a person typed, and it is
+capped and truncated for exactly that reason. And **facts** are whatever an
+agent or person wrote on purpose — which is why publishing is refused when
+the text or its source file looks like a credential, and why nothing is ever
+derived from a transcript.
+
+`the_transcript_and_tool_response_are_never_read` in `tests/codex.rs` asserts
+the second column on the bytes the relay stored, not on intent.
+
 ## Quick start
 
 ```sh
@@ -294,10 +366,10 @@ detection, not prevention, and the dashboard labels it that way.
 
 ```sh
 knoot init --relay wss://relay.example.com/ws   # once, by one person
-git add .knoot.toml .claude/settings.json && git commit
+git add .knoot.toml .claude/settings.json .codex/hooks.json && git commit
 ```
 
-Both files are meant to be committed. The hooks call `knoot` **by name**, so
+All three files are meant to be committed. The hooks call `knoot` **by name**, so
 they resolve on every machine that has the binary on `PATH` — set `KNOOT_BIN`
 if yours lives somewhere unusual. Each teammate then needs three things: the
 binary, `knoot daemon` running, and `knoot login` if the relay requires a
@@ -634,7 +706,7 @@ accident. Two runs, unprompted behaviour:
 ## Tests
 
 ```sh
-cargo test          # 281 tests, ~15s
+cargo test          # 300 tests, ~20s
 ```
 
 | Layer | File | What it protects |
@@ -643,6 +715,7 @@ cargo test          # 281 tests, ~15s
 | Memory | `tests/memory.rs` | a fact reaches a peer on the next turn unasked; scoped fetch by id; contradiction is a supersession; a `.env` is refused; a composed context never replaces a declared plan |
 | Encryption | `tests/mls.rs` | a relay dump yields no plaintext, no secret and no working credential; a removed device cannot derive the next epoch |
 | Awareness | `tests/awareness.rs`, `tests/areas.rs` | stale reads, creation collisions, deletions, hubs; one area's events never reach a session outside it |
+| Codex | `tests/codex.rs` | Codex's real payload shapes through the binary; a patch checked as a unit; shell reads count; the transcript and tool output never reach the relay |
 | Arbitration | `tests/arbitration.rs` | 400+ concurrent races → exactly one winner; conflict briefs carry holder + intent; repo isolation |
 | Failure | `tests/failure.rs` | fail-open on dead daemon, dead relay, unresponsive relay, malformed input; crash recovery via lease expiry |
 | Contract | `tests/e2e.rs` | real Claude Code hook payloads through the binary; exact deny/context JSON; latency ceiling |

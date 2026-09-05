@@ -159,6 +159,9 @@ struct Daemon {
     /// When each session's previous turn began, keyed by (repo_root, session).
     /// "What changed under you" is meaningless without a since; this is it.
     turns: Mutex<HashMap<(String, String), Ts>>,
+    /// Paths a `PreWriteBatch` said would stop existing, keyed by (repo_root,
+    /// session), confirmed and announced from `PostWriteBatch` once they have.
+    patch_removals: Mutex<HashMap<(String, String), Vec<(String, bool)>>>,
 }
 
 pub async fn run() -> Result<()> {
@@ -335,30 +338,111 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             // it looked at is local knowledge, and shipping every read to the
             // relay would multiply the log's volume for no reader.
             if let Some(rc) = ensure_repo(d, &repo_root).await {
-                {
-                    // Through the returned connection, never a second lookup
-                    // by the caller's spelling of the path: the map is keyed by
-                    // the resolved root, and a miss here would drop the read
-                    // silently — which is exactly what it did.
-                    let path = rel_path(&rc.repo_root, &path);
-                    let now = now_ms();
-                    let mut reads = rc.reads.lock().unwrap();
-                    let mine = reads.entry(session).or_default();
-                    mine.retain(|_, ts| now.saturating_sub(*ts) <= READ_WINDOW_MS);
-                    if mine.len() >= READ_CAP {
-                        // An agent grepping the tree is not reasoning about
-                        // four hundred files. Drop the oldest rather than the
-                        // new one: recency is the whole signal here.
-                        if let Some(oldest) =
-                            mine.iter().min_by_key(|(_, ts)| **ts).map(|(p, _)| p.clone())
-                        {
-                            mine.remove(&oldest);
-                        }
-                    }
-                    mine.insert(path, now);
-                }
+                record_read(&rc, &session, &path);
             }
             DResp::Ok
+        }
+        DReq::PreWriteBatch { repo_root, session, writes, removals } => {
+            let Some(rc) = ensure_repo(d, &repo_root).await else {
+                return DResp::allow(); // not knoot-enabled → fail open
+            };
+            ensure_session(&rc, &session, &whoami());
+            let writes: Vec<(String, bool)> = writes
+                .iter()
+                .map(|(raw, creating)| (normalize(&repo_root, raw), *creating))
+                .filter(|(p, _)| !p.is_empty())
+                .collect();
+            let removals: Vec<(String, bool)> = removals
+                .iter()
+                .map(|(raw, moved)| (normalize(&repo_root, raw), *moved))
+                .filter(|(p, _)| !p.is_empty())
+                .collect();
+
+            // Awareness for every path, gathered before the verdict: a stale
+            // read is worth saying whichever way this goes, and on a denial
+            // it rides the brief.
+            let mut notes = Vec::new();
+            for (path, creating) in &writes {
+                notes.extend(stale_read_notes(&rc, &session, path));
+                if *creating {
+                    notes.extend(create_collision_note(&rc, &repo_root, &session, path));
+                }
+                notes.extend(memory_note_for_path(&rc, path));
+            }
+
+            // Every path is checked before any is claimed. Denying on the
+            // third file after claiming the first two would leave a peer
+            // blocked out of files this session is not going to touch.
+            let branch = branch_of(&rc, &session);
+            let hit = {
+                let v = rc.view.lock().unwrap();
+                writes.iter().find_map(|(path, _)| {
+                    v.conflicting_on(&session, path, &branch)
+                        .map(|c| v.claim_with_live_intent(c))
+                        .map(|c| (path.clone(), c, v.is_hub(path), v.queue_len(path, &session)))
+                })
+            };
+            if let Some((path, c, hub, queued)) = hit {
+                report_denied(&rc, &session, &path, &c);
+                notes.truncate(MAX_NOTES);
+                return deny(&path, &c, hub, queued, notes);
+            }
+
+            // Claimed the way a shell command's targets are: locally, on the
+            // log, without a relay round trip per file. The mirror is what
+            // every other gate on this machine reads, so peers here are
+            // blocked at once; peers elsewhere learn from the appended event.
+            for (path, _) in &writes {
+                claim_locally(&rc, &session, path);
+                notes.extend(
+                    warn_cross_branch(&rc, &session, path)
+                        .first()
+                        .map(|_| format!("knoot: `{path}` is also being edited on another branch; these meet at merge.")),
+                );
+            }
+            if !removals.is_empty() {
+                d.patch_removals.lock().unwrap().insert((repo_root.clone(), session.clone()), removals);
+            }
+            notes.truncate(MAX_NOTES);
+            DResp::allow_with(notes)
+        }
+        DReq::PostWriteBatch { repo_root, session, paths } => {
+            let removals =
+                d.patch_removals.lock().unwrap().remove(&(repo_root.clone(), session.clone()));
+            let Some(rc) = ensure_repo(d, &repo_root).await else { return DResp::Ok };
+            let user = user_of(&rc, &session);
+            let gone = |p: &str| {
+                removals.as_ref().is_some_and(|r| r.iter().any(|(x, _)| x == p))
+                    && !std::path::Path::new(&repo_root).join(p).exists()
+            };
+            let mut mail = Vec::new();
+            for raw in &paths {
+                let path = normalize(&repo_root, raw);
+                if path.is_empty() || gone(&path) {
+                    continue;
+                }
+                let ev = Event::FileWritten { session: session.clone(), user: user.clone(), path: path.clone(), ts: now_ms() };
+                rc.view.lock().unwrap().apply(&ev);
+                let _ = rc.tx.send(ClientMsg::Append { event: ev });
+                let peers = {
+                    let v = rc.view.lock().unwrap();
+                    let branch = v.sessions.get(&session).map(|s| s.branch.clone()).unwrap_or_default();
+                    v.cross_branch_overlap(&session, &path, &branch)
+                };
+                mail.extend(cross_branch_note(&peers, &path));
+            }
+            // A path the patch was expected to remove, and which is in fact
+            // gone. Announced, not blocked: the only useful act left is
+            // telling everyone who was standing on it.
+            for (path, moved) in removals.unwrap_or_default() {
+                if std::path::Path::new(&repo_root).join(&path).exists() {
+                    continue;
+                }
+                let ev = Event::PathRemoved { session: session.clone(), user: user.clone(), path, moved, ts: now_ms() };
+                rc.view.lock().unwrap().apply(&ev);
+                let _ = rc.tx.send(ClientMsg::Append { event: ev });
+            }
+            if mail.is_empty() { DResp::Ok } else { DResp::Mail { items: mail } }
         }
         DReq::PostWrite { repo_root, session, path } => {
             if let Some(rc) = ensure_repo(d, &repo_root).await {
@@ -505,6 +589,19 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             };
             let a = crate::bashparse::analyze(&command);
             let mut notes = Vec::new();
+
+            // What the command reads, recorded before it runs. A few
+            // milliseconds early is harmless — a peer's write landing in
+            // between is exactly the case the staleness check exists for —
+            // and only paths that exist in the repo count, so `grep foo` with
+            // a pattern that looks like a file records nothing.
+            for raw in &a.reads {
+                let path = normalize(&repo_root, raw);
+                if path.is_empty() || !std::path::Path::new(&repo_root).join(&path).exists() {
+                    continue;
+                }
+                record_read(&rc, &session, &path);
+            }
 
             // Gate every path the command is expected to write.
             for raw in &a.targets {
@@ -1282,6 +1379,38 @@ fn rewrap_one(rc: &Arc<RepoConn>) {
 /// read, and then the section that would have mattered is not read either.
 const MEMORY_BUDGET_BYTES: usize = 1_500;
 const MEMORY_MAX_LINES: usize = 6;
+
+/// Remember that `session` has read `path`, for the staleness check before
+/// its next write.
+///
+/// Through the connection's own root, never a second lookup by the caller's
+/// spelling of the path: the map is keyed by the resolved root, and a miss
+/// here would drop the read silently — which is exactly what it did once.
+///
+/// One entry point for every way an agent reads: the `Read` tool, and — for
+/// an agent that has no such tool, or prefers the shell — `cat`, `sed -n`,
+/// `grep` and their kind, parsed out of the command before it runs.
+fn record_read(rc: &Arc<RepoConn>, session: &str, path: &str) {
+    let session = session.to_string();
+    let path = path.to_string();
+    let path = rel_path(&rc.repo_root, &path);
+    let now = now_ms();
+    let mut reads = rc.reads.lock().unwrap();
+    let mine = reads.entry(session).or_default();
+    mine.retain(|_, ts| now.saturating_sub(*ts) <= READ_WINDOW_MS);
+    if mine.len() >= READ_CAP {
+        // An agent grepping the tree is not reasoning about
+        // four hundred files. Drop the oldest rather than the
+        // new one: recency is the whole signal here.
+        if let Some(oldest) =
+            mine.iter().min_by_key(|(_, ts)| **ts).map(|(p, _)| p.clone())
+        {
+            mine.remove(&oldest);
+        }
+    }
+    mine.insert(path, now);
+}
+
 
 /// The paths this session has been in: what it holds, and what it has read.
 /// This is what makes the memory section about *this* turn rather than about

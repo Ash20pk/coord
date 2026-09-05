@@ -136,9 +136,15 @@ not an agent — do not ask them to release a file and do not wait on them, pick
 different work."* A brief that blurred the two would give advice that cannot be
 followed.
 
-**Left.** A Cursor or Copilot hook adapter, which is a per-tool integration
-rather than a gap in the design — the relay protocol was already
-client-agnostic and now there is a second client proving it.
+**Left, then closed for the agent that mattered.** Codex now speaks the hook
+surface natively (`tests/codex.rs`, 13 tests against its real payload shapes),
+which is the second *agent* — `knoot present` was the second *client*, and a
+person, not an agent. Three things were not free: a patch that touches
+several files is checked as a unit so a denial on one leaves no claim on the
+others; deletions are announced once the path is really gone; and reads
+through the shell are recorded, because Codex has no read tool — which turned
+out to be a gap for Claude Code in auto mode as well. Cursor and Copilot
+remain per-tool integrations: a matcher, a payload shape, a test file.
 
 ### 5. The log is written and never read — CLOSED
 
