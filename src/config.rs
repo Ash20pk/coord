@@ -19,6 +19,38 @@ pub struct RepoConfig {
     pub relay: String,
     /// Stable repo identifier shared by all collaborators.
     pub repo: String,
+    /// Paths every agent needs and nobody can hold for ten minutes without
+    /// stalling the room: `package.json`, lockfiles, a shared type file, a
+    /// route table. A hub gets a short lease and a queue instead of an owner.
+    ///
+    /// Declaring them is optional — a path claimed by three sessions inside
+    /// half an hour is treated as a hub whether anyone named it or not — and
+    /// the point of the list is to skip the first three collisions on a file
+    /// everybody already knows is shared.
+    ///
+    /// Committed, like the rest of this file, so the whole team agrees; and
+    /// omitted from what `save` writes when empty, so a repo enrolled before
+    /// hubs existed does not grow a puzzling empty key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hubs: Vec<String>,
+    /// The subtrees this repo is divided into. An area is the unit of *who
+    /// can collide with whom*: a room grants `(repo, area)` pairs, and a
+    /// session only hears about work in the areas it was granted.
+    ///
+    /// Declaring none is the normal case and means one area, `/`, holding the
+    /// whole repo — which is exactly how every repo behaved before areas
+    /// existed. Committed, like `hubs`, so the whole team divides the repo the
+    /// same way; omitted from what `save` writes when empty, so a repo
+    /// enrolled before areas existed does not grow a puzzling empty key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub areas: Vec<AreaDef>,
+}
+
+/// A named subtree: the name a room grants, and the path prefixes it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AreaDef {
+    pub name: String,
+    pub paths: Vec<String>,
 }
 
 impl RepoConfig {
@@ -33,6 +65,16 @@ impl RepoConfig {
     /// be told to migrate rather than left to find out by accident.
     pub fn is_legacy(repo_root: &Path) -> bool {
         !repo_root.join(CONFIG_FILE).is_file() && repo_root.join(LEGACY_CONFIG_FILE).is_file()
+    }
+
+    /// The area a repo-relative path belongs to, or `/` when no declaration
+    /// claims it.
+    ///
+    /// A path belongs to the **most specific** area — `src/auth/` inside
+    /// `src/` is the auth area — which is how CODEOWNERS resolves overlap, so
+    /// nobody has to learn a second rule.
+    pub fn area_for(&self, path: &str) -> String {
+        area_of(&self.areas, path)
     }
 
     pub fn save(&self, repo_root: &Path) -> anyhow::Result<()> {
@@ -52,6 +94,94 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+/// The area a repo-relative path belongs to under `areas`, or `/` when no
+/// declaration claims it.
+///
+/// A path belongs to the **most specific** area — `src/auth/` inside `src/` is
+/// the auth area — which is how CODEOWNERS resolves overlap, so nobody has to
+/// learn a second rule. Free-standing rather than a method because the relay
+/// holds the declarations without holding the repo they came from.
+pub fn area_of(areas: &[AreaDef], path: &str) -> String {
+    let path = path.trim_start_matches('/');
+    let mut best: Option<(usize, &str)> = None;
+    for a in areas {
+        for p in &a.paths {
+            let p = p.trim_matches('/');
+            if p.is_empty() {
+                continue;
+            }
+            let hit = path == p || path.starts_with(&format!("{p}/"));
+            if hit && best.is_none_or(|(len, _)| p.len() > len) {
+                best = Some((p.len(), &a.name));
+            }
+        }
+    }
+    best.map(|(_, n)| n.to_string()).unwrap_or_else(|| ROOT_AREA.to_string())
+}
+
+/// The area every path falls into when nothing more specific claims it, and
+/// the only area a repo has until someone declares others.
+pub const ROOT_AREA: &str = "/";
+
+/// Areas read out of a repo's `CODEOWNERS`.
+///
+/// Google's answer to fifty thousand engineers on one repo is an OWNERS file
+/// per subtree; a large org has already done this work, and re-entering it by
+/// hand is how a declaration goes stale. One area per distinct owner set —
+/// owners are what CODEOWNERS is *about*, so the areas it yields are the
+/// subtrees that already have different people behind them — named after the
+/// first owner with its `@` and any org prefix stripped.
+///
+/// Patterns that are not a plain subtree (`*`, `*.rs`, a glob in the middle)
+/// are skipped rather than guessed at: an area that quietly means something
+/// other than what CODEOWNERS says is worse than one that is missing.
+pub fn areas_from_codeowners(repo_root: &Path) -> Vec<AreaDef> {
+    let txt = ["CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(repo_root.join(p)).ok());
+    let Some(txt) = txt else { return Vec::new() };
+
+    let mut order: Vec<String> = Vec::new();
+    let mut by_owner: std::collections::HashMap<String, AreaDef> = std::collections::HashMap::new();
+    for line in txt.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let mut parts = line.split_whitespace();
+        let (Some(pattern), owners) = (parts.next(), parts.collect::<Vec<_>>()) else { continue };
+        if owners.is_empty() {
+            continue;
+        }
+        let Some(prefix) = subtree_of(pattern) else { continue };
+        let key = owners.join(" ");
+        let name = area_name(owners[0]);
+        let e = by_owner.entry(key.clone()).or_insert_with(|| {
+            order.push(key);
+            AreaDef { name, paths: Vec::new() }
+        });
+        if !e.paths.contains(&prefix) {
+            e.paths.push(prefix);
+        }
+    }
+    order.into_iter().filter_map(|k| by_owner.remove(&k)).collect()
+}
+
+/// A CODEOWNERS pattern as a plain subtree prefix, or `None` when it is a
+/// glob, a file extension rule, or the catch-all — none of which name a
+/// subtree, and the catch-all is `/` already.
+fn subtree_of(pattern: &str) -> Option<String> {
+    let p = pattern.trim_end_matches("/*").trim_end_matches("/**").trim_matches('/');
+    if p.is_empty() || p == "*" || p.contains(['*', '?', '[', '!']) {
+        return None;
+    }
+    Some(p.to_string())
+}
+
+/// `@acme/payments-team` -> `payments-team`. The org prefix is the same on
+/// every line, so keeping it would make every area name start with noise.
+fn area_name(owner: &str) -> String {
+    let o = owner.trim_start_matches('@');
+    o.rsplit('/').next().unwrap_or(o).to_string()
 }
 
 /// Where a relay token lives. Deliberately **not** `.knoot.toml`: that file is
@@ -153,6 +283,92 @@ pub fn token_for(relay_url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    fn areas() -> Vec<AreaDef> {
+        vec![
+            AreaDef { name: "core".into(), paths: vec!["src".into()] },
+            AreaDef { name: "auth".into(), paths: vec!["src/auth".into(), "docs/auth".into()] },
+        ]
+    }
+
+    #[test]
+    fn a_path_belongs_to_the_most_specific_area() {
+        let a = areas();
+        assert_eq!(area_of(&a, "src/auth/token.rs"), "auth", "not the enclosing `src`");
+        assert_eq!(area_of(&a, "src/http/client.rs"), "core");
+        assert_eq!(area_of(&a, "docs/auth/README.md"), "auth", "one area, two prefixes");
+        assert_eq!(area_of(&a, "README.md"), ROOT_AREA, "unclaimed paths fall to `/`");
+        assert_eq!(area_of(&a, "srcfoo/x.rs"), ROOT_AREA, "a prefix is a subtree, not a substring");
+        assert_eq!(area_of(&a, "src"), "core", "the prefix itself belongs to its area");
+    }
+
+    #[test]
+    fn a_repo_that_declares_no_areas_is_one_area() {
+        let cfg = RepoConfig {
+            relay: "ws://x".into(),
+            repo: "r".into(),
+            hubs: Vec::new(),
+            areas: Vec::new(),
+        };
+        assert_eq!(cfg.area_for("anything/at/all"), ROOT_AREA);
+    }
+
+    #[test]
+    fn codeowners_becomes_one_area_per_owner_set() {
+        let dir = std::env::temp_dir().join(format!("knoot-co-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".github")).unwrap();
+        std::fs::write(
+            dir.join(".github/CODEOWNERS"),
+            "# review routing\n\
+             *            @acme/everyone\n\
+             /src/auth/   @acme/auth-team\n\
+             /docs/auth   @acme/auth-team\n\
+             /src/billing @acme/payments @acme/auth-team\n\
+             *.md         @acme/docs\n",
+        )
+        .unwrap();
+
+        let got = areas_from_codeowners(&dir);
+        assert_eq!(
+            got,
+            vec![
+                AreaDef {
+                    name: "auth-team".into(),
+                    paths: vec!["src/auth".into(), "docs/auth".into()],
+                },
+                AreaDef { name: "payments".into(), paths: vec!["src/billing".into()] },
+            ],
+            "one area per distinct owner set; the catch-all and the extension rule \
+             name no subtree and are skipped"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_repo_with_no_codeowners_imports_nothing() {
+        let dir = std::env::temp_dir().join(format!("knoot-co-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(areas_from_codeowners(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn areas_survive_a_round_trip_through_the_config_file() {
+        let dir = std::env::temp_dir().join(format!("knoot-ar-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg =
+            RepoConfig { relay: "ws://x".into(), repo: "r".into(), hubs: Vec::new(), areas: areas() };
+        cfg.save(&dir).unwrap();
+        assert_eq!(RepoConfig::load(&dir).unwrap().areas, areas());
+
+        // And a repo enrolled before areas existed does not grow the key.
+        let bare =
+            RepoConfig { relay: "ws://x".into(), repo: "r".into(), hubs: Vec::new(), areas: Vec::new() };
+        bare.save(&dir).unwrap();
+        let txt = std::fs::read_to_string(dir.join(CONFIG_FILE)).unwrap();
+        assert!(!txt.contains("areas"), "no puzzling empty key: {txt}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
 
     /// One token per relay, not per repo: a team on one relay logs in once.
@@ -194,7 +410,7 @@ mod tests {
         assert!(RepoConfig::is_legacy(&dir), "and it must be reported as legacy");
 
         // Once migrated, the new file wins and nothing is flagged.
-        RepoConfig { relay: cfg.relay, repo: "new-repo".into() }.save(&dir).unwrap();
+        RepoConfig { relay: cfg.relay, repo: "new-repo".into(), hubs: Vec::new(), areas: Vec::new() }.save(&dir).unwrap();
         assert_eq!(RepoConfig::load(&dir).unwrap().repo, "new-repo");
         assert!(!RepoConfig::is_legacy(&dir));
         std::fs::remove_dir_all(&dir).ok();

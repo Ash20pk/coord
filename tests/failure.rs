@@ -13,6 +13,7 @@ fn prewrite(root: &std::path::Path, session: &str, path: &str) -> DReq {
         repo_root: root.to_string_lossy().to_string(),
         session: session.into(),
         path: format!("{}/{}", root.to_string_lossy(), path),
+        creating: false,
     }
 }
 

@@ -12,6 +12,15 @@ pub struct Analysis {
     /// True when the command could not be proven read-only. Anything unknown,
     /// any interpreter, any command substitution.
     pub audit: bool,
+    /// Paths this command is expected to make *stop existing*, and whether it
+    /// was a move rather than a delete.
+    ///
+    /// These are targets too — a delete is a write and is gated as one — but
+    /// they are also the half of a conflict a claim cannot express: 26.8% of
+    /// real agent conflicts are modify/delete, and "someone still holds a
+    /// claim on a file that is gone" is not a state anyone can act on. Kept
+    /// separately so the daemon can announce them once they have happened.
+    pub removals: Vec<(String, bool)>,
 }
 
 /// Commands that cannot modify the working tree.
@@ -227,7 +236,7 @@ fn base(cmd: &str) -> &str {
 
 pub fn analyze(cmd: &str) -> Analysis {
     let (toks, saw_subst) = lex(cmd);
-    let mut out = Analysis { targets: Vec::new(), audit: saw_subst };
+    let mut out = Analysis { targets: Vec::new(), audit: saw_subst, removals: Vec::new() };
 
     // Split into command segments at separators.
     for seg in toks.split(|t| matches!(t, Tok::Sep)) {
@@ -262,6 +271,8 @@ pub fn analyze(cmd: &str) -> Analysis {
 
     out.targets.sort();
     out.targets.dedup();
+    out.removals.sort();
+    out.removals.dedup();
     out
 }
 
@@ -289,11 +300,23 @@ fn analyze_command(name: &str, args: &[&str], out: &mut Analysis) {
             if let Some(dst) = f.last() {
                 out.targets.push(dst.clone());
             }
+            // A move empties its sources. `cp` does not, and `mv a b` where b
+            // is a directory is a move of `a` all the same.
+            if name == "mv" && f.len() >= 2 {
+                for src in &f[..f.len() - 1] {
+                    out.removals.push((src.clone(), true));
+                }
+            }
             if name == "rsync" {
                 out.audit = true;
             }
         }
-        "rm" | "unlink" | "touch" | "truncate" | "mkdir" | "chmod" | "chown" => {
+        "rm" | "unlink" => {
+            let f = files(args);
+            out.removals.extend(f.iter().map(|p| (p.clone(), false)));
+            out.targets.extend(f);
+        }
+        "touch" | "truncate" | "mkdir" | "chmod" | "chown" => {
             out.targets.extend(files(args))
         }
         "dd" => {
@@ -314,6 +337,25 @@ fn analyze_command(name: &str, args: &[&str], out: &mut Analysis) {
             if !GIT_READ_ONLY.contains(&sub) {
                 out.audit = true; // checkout/apply/restore/reset/stash/clean/...
             }
+            // `git rm` and `git mv` are the versions an agent reaches for in a
+            // repository, and they remove paths as surely as the shell ones.
+            match sub {
+                "rm" => {
+                    let f: Vec<String> = files(args).into_iter().skip(1).collect();
+                    out.removals.extend(f.iter().map(|p| (p.clone(), false)));
+                    out.targets.extend(f);
+                }
+                "mv" => {
+                    let f: Vec<String> = files(args).into_iter().skip(1).collect();
+                    if f.len() >= 2 {
+                        out.targets.push(f[f.len() - 1].clone());
+                        for src in &f[..f.len() - 1] {
+                            out.removals.push((src.clone(), true));
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
         _ => {
             if OPAQUE.contains(&name) {
@@ -327,6 +369,47 @@ fn analyze_command(name: &str, args: &[&str], out: &mut Analysis) {
 
 #[cfg(test)]
 mod tests {
+
+    fn removals(cmd: &str) -> Vec<(String, bool)> {
+        analyze(cmd).removals
+    }
+
+    /// A deletion is gated like a write — it is one — but it is also the half
+    /// of a conflict a claim cannot express, so it has to be recognisable as a
+    /// deletion and not merely as a target.
+    #[test]
+    fn a_delete_is_both_a_target_and_a_removal() {
+        assert_eq!(t("rm src/auth.js"), vec!["src/auth.js"]);
+        assert_eq!(removals("rm src/auth.js"), vec![("src/auth.js".to_string(), false)]);
+        assert_eq!(removals("rm -rf src/legacy"), vec![("src/legacy".to_string(), false)]);
+        assert_eq!(removals("unlink src/a.js"), vec![("src/a.js".to_string(), false)]);
+    }
+
+    /// A move empties its source. `cp` does not, and mistaking one for the
+    /// other would announce a deletion that never happened.
+    #[test]
+    fn a_move_removes_its_source_and_a_copy_does_not() {
+        assert_eq!(removals("mv src/a.js src/b.js"), vec![("src/a.js".to_string(), true)]);
+        assert!(t("mv src/a.js src/b.js").contains(&"src/b.js".to_string()));
+        assert!(removals("cp src/a.js src/b.js").is_empty());
+    }
+
+    /// `git rm` and `git mv` are what an agent reaches for inside a
+    /// repository, and the sub-command must not be mistaken for a path.
+    #[test]
+    fn git_rm_and_git_mv_are_removals_too() {
+        assert_eq!(removals("git rm src/old.js"), vec![("src/old.js".to_string(), false)]);
+        assert_eq!(removals("git mv src/a.js src/b.js"), vec![("src/a.js".to_string(), true)]);
+        assert!(t("git mv src/a.js src/b.js").contains(&"src/b.js".to_string()));
+        assert!(!removals("git rm src/old.js").iter().any(|(p, _)| p == "rm"));
+    }
+
+    #[test]
+    fn a_command_that_removes_nothing_reports_nothing() {
+        for cmd in ["cat src/a.js", "echo hi > src/b.js", "sed -i '' s/a/b/ src/c.js", "touch x"] {
+            assert!(removals(cmd).is_empty(), "{cmd} removes nothing");
+        }
+    }
     use super::*;
 
     fn t(cmd: &str) -> Vec<String> {

@@ -61,7 +61,8 @@ async fn stream(cfg: RepoConfig, st: Arc<Mutex<State>>) {
         // The same dial the daemon uses: a hosted relay rejects an untokened
         // watcher, and the dashboard would show a permanently red dot.
         if let Ok((mut ws, _)) = crate::daemon::connect_authed(&cfg.relay).await {
-            let hello = ClientMsg::Hello { repo: cfg.repo.clone(), daemon: "watch".into() };
+            let hello =
+                ClientMsg::Hello { repo: cfg.repo.clone(), daemon: "watch".into(), areas: cfg.areas.clone() };
             if ws.send(WsMsg::Text(serde_json::to_string(&hello).unwrap())).await.is_ok() {
                 st.lock().unwrap().connected = true;
                 while let Some(Ok(WsMsg::Text(t))) = ws.next().await {
@@ -88,7 +89,18 @@ async fn stream(cfg: RepoConfig, st: Arc<Mutex<State>>) {
                             }
                             s.view.apply(&event);
                         }
-                        ServerMsg::ClaimResp { .. } => {}
+                        // The dashboard watches the log; memory is not on it.
+                        // The dashboard watches the log. Memory and the MLS
+                        // delivery service are not on it.
+                        ServerMsg::ClaimResp { .. }
+                        | ServerMsg::MemShards { .. }
+                        | ServerMsg::MemRejected { .. }
+                        | ServerMsg::MemForgotten { .. }
+                        | ServerMsg::MlsLog { .. }
+                        | ServerMsg::MlsWake { .. }
+                        | ServerMsg::MlsRejected { .. }
+                        | ServerMsg::MlsKeyPackage { .. }
+                        | ServerMsg::MlsRoster { .. } => {}
                     }
                 }
             }
@@ -168,6 +180,41 @@ fn describe(e: &Event) -> Option<String> {
                 branch
             )
         }
+        Event::PathRemoved { user, path, moved, ts, .. } => format!(
+            "{DIM}{}{R}  {CYAN}{:<9}{R} {YELLOW}{}{R} {} {DIM}(readers notified){R}",
+            clock(*ts),
+            user,
+            if *moved { "MOVED  " } else { "DELETED" },
+            path
+        ),
+        Event::StaleRead { user, path, peer_user, ts, .. } => format!(
+            "{DIM}{}{R}  {CYAN}{:<9}{R} {YELLOW}STALE  {R} {} {DIM}(read before {} wrote it){R}",
+            clock(*ts),
+            user,
+            path,
+            peer_user
+        ),
+        Event::CreateCollision { user, path, peer_user, ts, .. } => format!(
+            "{DIM}{}{R}  {CYAN}{:<9}{R} {RED}ADD/ADD{R} {} {DIM}({} created it first){R}",
+            clock(*ts),
+            user,
+            path,
+            peer_user
+        ),
+        Event::DuplicateIntent { user, peer_user, peer_text, ts, .. } => format!(
+            "{DIM}{}{R}  {CYAN}{:<9}{R} {RED}DUP TASK{R} {DIM}same as {}: {}{R}",
+            clock(*ts),
+            user,
+            peer_user,
+            truncate(peer_text, 44)
+        ),
+        Event::MemoryRefused { user, name, reason, ts, .. } => format!(
+            "{DIM}{}{R}  {CYAN}{:<9}{R} {RED}REFUSED{R} memory \"{}\" {DIM}({}){R}",
+            clock(*ts),
+            user,
+            truncate(name, 24),
+            truncate(reason, 48)
+        ),
         Event::SessionEnded { ts, .. } => format!("{DIM}{}  session ended{R}", clock(*ts)),
         Event::ClaimReleased { path, ts, .. } => {
             format!("{DIM}{}  released {}{R}", clock(*ts), path)

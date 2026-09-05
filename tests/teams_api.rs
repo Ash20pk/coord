@@ -188,7 +188,7 @@ async fn tokens_can_be_minted_and_revoked_but_never_the_last_one() {
         post(&format!("{base}/api/tokens/{first_id}/revoke"), Some(&first), serde_json::json!({}))
             .await;
     assert_eq!(code, 400, "{err}");
-    assert!(err["error"].as_str().unwrap().contains("last live token"));
+    assert!(err["error"].as_str().unwrap().contains("last live device key"));
 
     let (code, minted) = post(
         &format!("{base}/api/tokens"),
@@ -259,4 +259,422 @@ async fn the_site_and_console_are_served_by_the_relay_itself() {
         assert_eq!(code, 200, "{path} must be public — it carries no data");
         let _ = needle;
     }
+}
+
+/// A registered team is a team of one until someone joins, and that one is
+/// the owner of a `general` room over every repo. Nothing downstream should
+/// ever meet an identity with no member and no areas.
+#[tokio::test]
+async fn a_registered_team_has_an_owner_in_a_general_room() {
+    let base = start_api(None).await;
+    let (_, j) = post(
+        &format!("{base}/api/register"),
+        None,
+        serde_json::json!({ "team": "Acme", "email": "ash@example.com" }),
+    )
+    .await;
+    let key = j["token"].as_str().unwrap().to_string();
+
+    let (code, who) = get(&format!("{base}/api/whoami"), Some(&key)).await;
+    assert_eq!(code, 200, "{who}");
+    assert_eq!(who["me"]["email"], "ash@example.com");
+    assert_eq!(who["me"]["role"], "owner");
+    assert_eq!(who["rooms"], serde_json::json!(["general"]));
+    assert_eq!(who["me"]["areas"], serde_json::json!([{ "repo": "*", "area": "/" }]));
+}
+
+/// The phase 1 exit criterion, over the API: a second person joins, gets their
+/// own key, and is removed again without anybody else's key changing.
+#[tokio::test]
+async fn a_second_person_can_join_and_be_removed_without_touching_other_keys() {
+    let base = start_api(None).await;
+    let (_, j) = post(
+        &format!("{base}/api/register"),
+        None,
+        serde_json::json!({ "team": "Acme", "email": "ash@example.com" }),
+    )
+    .await;
+    let owner_key = j["token"].as_str().unwrap().to_string();
+
+    // Priya is put in a room, which is what records her as a member.
+    let (code, room) = post(
+        &format!("{base}/api/rooms"),
+        Some(&owner_key),
+        serde_json::json!({ "name": "platform" }),
+    )
+    .await;
+    assert_eq!(code, 200, "{room}");
+    let room_id = room["room"].as_str().unwrap().to_string();
+
+    // An invited person exists as a member before they hold a key: the console
+    // creates the member, then mints the device the person actually installs.
+    let (code, team) = get(&format!("{base}/api/team"), Some(&owner_key)).await;
+    assert_eq!(code, 200, "{team}");
+    let owner_id = team["me"]["member_id"].as_str().unwrap().to_string();
+    let (code, _) = post(
+        &format!("{base}/api/rooms/{room_id}/members"),
+        Some(&owner_key),
+        serde_json::json!({ "member": owner_id, "role": "owner" }),
+    )
+    .await;
+    assert_eq!(code, 200);
+
+    // Priya's key. She has no console sign-in here, so the owner mints for a
+    // member the owner created — the self-hosted path, with no Supabase.
+    let (code, minted) = post(
+        &format!("{base}/api/tokens"),
+        Some(&owner_key),
+        serde_json::json!({ "label": "priya laptop" }),
+    )
+    .await;
+    assert_eq!(code, 200, "{minted}");
+    let second_key = minted["token"].as_str().unwrap().to_string();
+
+    // Both keys work, and both name the same verified person so far.
+    for k in [&owner_key, &second_key] {
+        let (code, who) = get(&format!("{base}/api/whoami"), Some(k)).await;
+        assert_eq!(code, 200, "{who}");
+        assert_eq!(who["me"]["email"], "ash@example.com");
+    }
+
+    // Revoking one machine leaves the other alone. This is the thing a
+    // team-wide bearer token could never do.
+    let device = minted["token_id"].as_str().unwrap().to_string();
+    let (code, _) =
+        post(&format!("{base}/api/tokens/{device}/revoke"), Some(&owner_key), serde_json::json!({}))
+            .await;
+    assert_eq!(code, 200);
+    let (code, _) = get(&format!("{base}/api/whoami"), Some(&second_key)).await;
+    assert_eq!(code, 401, "the revoked machine is out");
+    let (code, _) = get(&format!("{base}/api/whoami"), Some(&owner_key)).await;
+    assert_eq!(code, 200, "and nobody else noticed");
+}
+
+/// Rooms are per team on every write, not just on read: an id from another
+/// team is not an authorisation bug waiting for someone to guess it.
+#[tokio::test]
+async fn one_teams_room_cannot_be_edited_by_another_over_the_api() {
+    let base = start_api(None).await;
+    let (_, ja) = post(
+        &format!("{base}/api/register"),
+        None,
+        serde_json::json!({ "team": "A", "email": "a@example.com" }),
+    )
+    .await;
+    let (_, jb) = post(
+        &format!("{base}/api/register"),
+        None,
+        serde_json::json!({ "team": "B", "email": "b@example.com" }),
+    )
+    .await;
+    let a = ja["token"].as_str().unwrap().to_string();
+    let b = jb["token"].as_str().unwrap().to_string();
+
+    let (_, room) =
+        post(&format!("{base}/api/rooms"), Some(&b), serde_json::json!({ "name": "payments" })).await;
+    let room_id = room["room"].as_str().unwrap().to_string();
+
+    for (path, body) in [
+        (format!("api/rooms/{room_id}/areas"), serde_json::json!({ "repo": "api", "area": "src" })),
+        (format!("api/rooms/{room_id}/delete"), serde_json::json!({})),
+        (format!("api/rooms/{room_id}/policy"), serde_json::json!({ "facts": { "enabled": false } })),
+    ] {
+        let (code, err) = post(&format!("{base}/{path}"), Some(&a), body).await;
+        assert_eq!(code, 400, "{path} must be refused: {err}");
+    }
+
+    let (code, team) = get(&format!("{base}/api/team"), Some(&b)).await;
+    assert_eq!(code, 200, "{team}");
+    let names: Vec<&str> =
+        team["rooms"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"payments"), "B's room is untouched: {names:?}");
+}
+
+/// A room grants exactly the areas it holds. Nothing enforces areas on the log
+/// yet — that is phase 3 — but the grant a key carries is what phase 3 will
+/// read, so it has to be right now.
+#[tokio::test]
+async fn a_room_grants_the_areas_an_admin_gave_it() {
+    let base = start_api(None).await;
+    let (_, j) = post(
+        &format!("{base}/api/register"),
+        None,
+        serde_json::json!({ "team": "Acme", "email": "ash@example.com" }),
+    )
+    .await;
+    let key = j["token"].as_str().unwrap().to_string();
+    let (_, room) =
+        post(&format!("{base}/api/rooms"), Some(&key), serde_json::json!({ "name": "auth" })).await;
+    let room_id = room["room"].as_str().unwrap().to_string();
+    let (_, team) = get(&format!("{base}/api/team"), Some(&key)).await;
+    let me = team["me"]["member_id"].as_str().unwrap().to_string();
+
+    let (code, _) = post(
+        &format!("{base}/api/rooms/{room_id}/areas"),
+        Some(&key),
+        serde_json::json!({ "repo": "api", "area": "src/auth" }),
+    )
+    .await;
+    assert_eq!(code, 200);
+    let (code, _) = post(
+        &format!("{base}/api/rooms/{room_id}/members"),
+        Some(&key),
+        serde_json::json!({ "member": me }),
+    )
+    .await;
+    assert_eq!(code, 200);
+
+    let (_, who) = get(&format!("{base}/api/whoami"), Some(&key)).await;
+    let areas = who["me"]["areas"].as_array().unwrap();
+    assert!(
+        areas.contains(&serde_json::json!({ "repo": "api", "area": "src/auth" })),
+        "the new grant is missing: {areas:?}"
+    );
+    let rooms: Vec<&str> = who["rooms"].as_array().unwrap().iter().map(|r| r.as_str().unwrap()).collect();
+    assert_eq!(rooms, vec!["auth", "general"]);
+}
+
+/// The general room is what makes "a key always resolves to some area" true.
+#[tokio::test]
+async fn the_general_room_cannot_be_deleted_over_the_api() {
+    let base = start_api(None).await;
+    let (_, j) = post(
+        &format!("{base}/api/register"),
+        None,
+        serde_json::json!({ "team": "Acme", "email": "ash@example.com" }),
+    )
+    .await;
+    let key = j["token"].as_str().unwrap().to_string();
+    let (_, team) = get(&format!("{base}/api/team"), Some(&key)).await;
+    let general = team["rooms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "general")
+        .expect("every team has one")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (code, err) =
+        post(&format!("{base}/api/rooms/{general}/delete"), Some(&key), serde_json::json!({})).await;
+    assert_eq!(code, 400, "{err}");
+    assert!(err["error"].as_str().unwrap().contains("cannot be deleted"));
+}
+
+/// A relay whose credential lives in its environment has no database rows to
+/// edit, and the refusal has to say so rather than 500 or silently no-op.
+#[tokio::test]
+async fn an_environment_credential_cannot_manage_members_or_rooms() {
+    let base = start_api(Some("operator-secret")).await;
+    let s = Some("operator-secret");
+    for (path, body) in [
+        ("api/rooms", serde_json::json!({ "name": "platform" })),
+        ("api/tokens", serde_json::json!({ "label": "ci" })),
+        ("api/members/attach", serde_json::json!({ "from": "m_nope" })),
+    ] {
+        let (code, err) = post(&format!("{base}/{path}"), s, body).await;
+        assert_eq!(code, 400, "{path}: {err}");
+        assert!(
+            err["error"].as_str().unwrap().contains("configured in its environment"),
+            "{path} must explain itself: {err}"
+        );
+    }
+    // But it still authenticates, and still reports a usable identity.
+    let (code, who) = get(&format!("{base}/api/whoami"), s).await;
+    assert_eq!(code, 200, "{who}");
+    assert_eq!(who["team_id"], "root");
+    assert_eq!(who["me"]["areas"], serde_json::json!([{ "repo": "*", "area": "/" }]));
+}
+
+/// The gap this closes: until now a second *person* could only come into being
+/// through Supabase, so a self-hosted relay could mint any number of keys and
+/// every one of them named the same human. Rooms, areas and memory provenance
+/// are all about *who*.
+#[tokio::test]
+async fn a_self_hosted_relay_can_add_a_second_person_and_key_them() {
+    let base = start_api(None).await;
+    let (_, j) = post(
+        &format!("{base}/api/register"),
+        None,
+        serde_json::json!({ "team": "Acme", "email": "ash@example.com" }),
+    )
+    .await;
+    let owner_key = j["token"].as_str().unwrap().to_string();
+
+    // A colleague, and the key to give them, in one call — there is no email
+    // to send an invitation to on a relay with no cloud behind it.
+    let (code, priya) = post(
+        &format!("{base}/api/members"),
+        Some(&owner_key),
+        serde_json::json!({ "email": "Priya@Example.com", "label": "priya laptop" }),
+    )
+    .await;
+    assert_eq!(code, 200, "{priya}");
+    assert_eq!(priya["email"], "priya@example.com", "email is normalised");
+    assert_eq!(priya["role"], "member");
+    let priya_key = priya["token"].as_str().expect("a key comes back once").to_string();
+
+    // The key is hers, not the owner's. This is the whole point: an event's
+    // author and a shard's provenance now name two different people.
+    let (code, who) = get(&format!("{base}/api/whoami"), Some(&priya_key)).await;
+    assert_eq!(code, 200, "{who}");
+    assert_eq!(who["me"]["email"], "priya@example.com");
+    assert_eq!(who["me"]["member_id"], priya["member"]);
+    assert!(priya["member"].as_str().is_some_and(|m| !m.is_empty()));
+
+    // And the owner is still the owner.
+    let (_, who) = get(&format!("{base}/api/whoami"), Some(&owner_key)).await;
+    assert_eq!(who["me"]["email"], "ash@example.com");
+    assert_eq!(who["me"]["role"], "owner");
+}
+
+/// Adding somebody who is already here must not quietly rewrite their role.
+/// `ensure_member` would, which would make "add ash@example.com as a member"
+/// a way to demote the owner.
+#[tokio::test]
+async fn adding_an_existing_member_changes_nothing_about_them() {
+    let base = start_api(None).await;
+    let (_, j) = post(
+        &format!("{base}/api/register"),
+        None,
+        serde_json::json!({ "team": "Acme", "email": "ash@example.com" }),
+    )
+    .await;
+    let owner_key = j["token"].as_str().unwrap().to_string();
+
+    let (code, again) = post(
+        &format!("{base}/api/members"),
+        Some(&owner_key),
+        serde_json::json!({ "email": "ash@example.com", "role": "member", "label": "sneaky" }),
+    )
+    .await;
+    assert_eq!(code, 200, "{again}");
+    assert_eq!(again["existing"], true);
+    assert_eq!(again["role"], "owner", "the owner is still the owner");
+    assert!(again["token"].is_null(), "and no key was minted behind their back");
+
+    let (_, who) = get(&format!("{base}/api/whoami"), Some(&owner_key)).await;
+    assert_eq!(who["me"]["role"], "owner");
+}
+
+/// Creating a member hands out access, so it is an admin call — and the roles
+/// it may hand out stop short of the one that owns the team.
+#[tokio::test]
+async fn only_an_admin_may_add_a_member_and_never_a_second_owner() {
+    let base = start_api(None).await;
+    let (_, j) = post(
+        &format!("{base}/api/register"),
+        None,
+        serde_json::json!({ "team": "Acme", "email": "ash@example.com" }),
+    )
+    .await;
+    let owner_key = j["token"].as_str().unwrap().to_string();
+
+    // A plain member's key.
+    let (_, priya) = post(
+        &format!("{base}/api/members"),
+        Some(&owner_key),
+        serde_json::json!({ "email": "priya@example.com", "label": "laptop" }),
+    )
+    .await;
+    let priya_key = priya["token"].as_str().unwrap().to_string();
+
+    let (code, e) = post(
+        &format!("{base}/api/members"),
+        Some(&priya_key),
+        serde_json::json!({ "email": "outsider@example.com" }),
+    )
+    .await;
+    assert_eq!(code, 403, "a member may not widen the team: {e}");
+
+    // An admin may, and an admin may make another admin.
+    let (code, sam) = post(
+        &format!("{base}/api/members"),
+        Some(&owner_key),
+        serde_json::json!({ "email": "sam@example.com", "role": "admin", "label": "desktop" }),
+    )
+    .await;
+    assert_eq!(code, 200, "{sam}");
+    let sam_key = sam["token"].as_str().unwrap().to_string();
+    let (code, _) = post(
+        &format!("{base}/api/members"),
+        Some(&sam_key),
+        serde_json::json!({ "email": "kim@example.com" }),
+    )
+    .await;
+    assert_eq!(code, 200, "an admin can add people too");
+
+    // But not a second owner, and not something that is not a role at all.
+    for role in ["owner", "root", ""] {
+        let (code, _) = post(
+            &format!("{base}/api/members"),
+            Some(&owner_key),
+            serde_json::json!({ "email": format!("x-{role}@example.com"), "role": role }),
+        )
+        .await;
+        assert_eq!(code, 400, "role {role:?} must be refused");
+    }
+    // Nor a non-address.
+    for email in ["notanemail", "", "  "] {
+        let (code, _) = post(
+            &format!("{base}/api/members"),
+            Some(&owner_key),
+            serde_json::json!({ "email": email }),
+        )
+        .await;
+        assert_eq!(code, 400, "email {email:?} must be refused");
+    }
+}
+
+/// One team may not add a person to another, which is the property every call
+/// on this surface has to have.
+#[tokio::test]
+async fn a_team_cannot_add_a_member_to_another_team() {
+    let base = start_api(None).await;
+    let mut keys = Vec::new();
+    for team in ["Acme", "Globex"] {
+        let (_, j) = post(
+            &format!("{base}/api/register"),
+            None,
+            serde_json::json!({ "team": team, "email": format!("owner@{team}.example") }),
+        )
+        .await;
+        keys.push(j["token"].as_str().unwrap().to_string());
+    }
+    let (_, added) = post(
+        &format!("{base}/api/members"),
+        Some(&keys[0]),
+        serde_json::json!({ "email": "shared@example.com", "label": "laptop" }),
+    )
+    .await;
+    let member = added["member"].as_str().unwrap().to_string();
+
+    // Globex sees nothing of Acme's people.
+    let (_, team) = get(&format!("{base}/api/team"), Some(&keys[1])).await;
+    let emails: Vec<String> = team["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["email"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(!emails.contains(&"shared@example.com".to_string()), "{emails:?}");
+
+    // And cannot mint for them, nor remove them.
+    let (code, _) = post(
+        &format!("{base}/api/tokens"),
+        Some(&keys[1]),
+        serde_json::json!({ "label": "stolen", "member": member }),
+    )
+    .await;
+    assert_ne!(code, 200, "minting for another team's member must fail");
+    let (code, _) = post(
+        &format!("{base}/api/members/{member}/remove"),
+        Some(&keys[1]),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_ne!(code, 200, "removing another team's member must fail");
+    let (code, _) = get(&format!("{base}/api/whoami"), Some(added["token"].as_str().unwrap())).await;
+    assert_eq!(code, 200, "and she still works");
 }

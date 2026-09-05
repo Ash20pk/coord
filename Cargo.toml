@@ -30,6 +30,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # The web app is built by Vite and embedded, so the relay is still one binary
 # serving its own front end with no second deploy and no CORS.
 include_dir = "0.7"
+openmls = "0.8.1"
+openmls_rust_crypto = "0.5.1"
+openmls_basic_credential = "0.5.0"
+openmls_traits = "0.5.0"
+chacha20poly1305 = "0.11.0"
 
 [profile.release]
 lto = true

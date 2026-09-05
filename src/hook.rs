@@ -43,10 +43,23 @@ fn inner() {
                 DReq::BashPost { repo_root, session }
             }
         }
+        // A read is not a write and is never gated — but it is half of a
+        // conflict. STORM's largest single result is that a write is stale
+        // when what the agent *read* has changed, even where the file being
+        // written is untouched, so the daemon needs to know what this session
+        // has looked at.
+        "PostToolUse" if matches!(tool, "Read" | "NotebookRead") => {
+            let Some(path) = read_path_of(&v) else { return };
+            DReq::FileRead { repo_root, session, path }
+        }
         "PreToolUse" | "PostToolUse" => {
             let Some(path) = file_path_of(&v) else { return };
             if event == "PreToolUse" {
-                DReq::PreWrite { repo_root, session, path }
+                // `Write` replaces a file whole; `Edit` changes part of one.
+                // Creating a path a peer created a minute ago is a different
+                // failure from editing it, and only the client knows which
+                // tool is about to run.
+                DReq::PreWrite { repo_root, session, path, creating: tool == "Write" }
             } else {
                 DReq::PostWrite { repo_root, session, path }
             }
@@ -81,12 +94,34 @@ fn inner() {
     let Some(resp) = call_daemon(&req) else { return };
 
     match (event, resp) {
-        ("PreToolUse", DResp::Decision { allow: false, reason }) => {
+        ("PreToolUse", DResp::Decision { allow: false, reason, notes }) => {
+            // Advisory lines ride on the denial. It is the highest-attention
+            // surface in the product: the agent is stopped, reading, and about
+            // to re-plan, which is exactly when "the file you read has moved"
+            // is worth something.
+            let mut why = reason.unwrap_or_default();
+            for n in &notes {
+                why.push('\n');
+                why.push_str(n);
+            }
             let out = json!({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
-                    "permissionDecisionReason": reason.unwrap_or_default(),
+                    "permissionDecisionReason": why,
+                }
+            });
+            println!("{out}");
+        }
+        // Allowed, with something worth saying. Deliberately *not* a
+        // `permissionDecision: allow`: that would auto-approve the write and
+        // override whatever the human configured about confirming edits. The
+        // note goes in as context and the tool call takes its normal course.
+        ("PreToolUse", DResp::Decision { allow: true, notes, .. }) if !notes.is_empty() => {
+            let out = json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "additionalContext": notes.join("\n"),
                 }
             });
             println!("{out}");
@@ -119,8 +154,8 @@ fn inner() {
             });
             println!("{out}");
         }
-        ("SessionStart", DResp::Peers { sessions, claims, writes, mail })
-        | ("UserPromptSubmit", DResp::Peers { sessions, claims, writes, mail }) => {
+        ("SessionStart", DResp::Peers { sessions, claims, writes, mail, notes, depended_on, memory, cached, context })
+        | ("UserPromptSubmit", DResp::Peers { sessions, claims, writes, mail, notes, depended_on, memory, cached, context }) => {
             // Everything here arrives unasked. A capable model will run
             // `knoot who` and read its messages; a cheap one demonstrably
             // will not, even when told to — so nothing an agent needs to
@@ -136,10 +171,76 @@ fn inner() {
                 ctx.push('\n');
             }
 
+            // Then anything advisory the daemon worked out for this turn: a
+            // peer on the same task, a file this session read that has since
+            // moved or gone.
+            if !notes.is_empty() {
+                ctx.push_str("knoot: worth knowing before you start\n");
+                for n in &notes {
+                    ctx.push_str(&format!("- {n}\n"));
+                }
+                ctx.push('\n');
+            }
+
+            // What peers are *doing*, from the plans they published on
+            // purpose. First of the memory sections, and above the peer list:
+            // knowing somebody is mid-way through the design you were about to
+            // choose changes the turn, where knowing they hold a file only
+            // changes the order you do things in.
+            if !context.is_empty() {
+                ctx.push_str("knoot: what your peers are doing right now\n");
+                for c in &context {
+                    ctx.push_str(&format!("- {c}\n"));
+                }
+                ctx.push_str(
+                    "Do not redo or design against these. If one overlaps your task, say so \
+                     with knoot msg before you start.\n\n",
+                );
+            }
+
+            // What the team has learned about the code this session is in.
+            // After mail and advisories — those are about right now — and
+            // before the peer writes, because a fact is the thing most likely
+            // to change what the agent does rather than how it does it.
+            if !memory.is_empty() {
+                ctx.push_str("knoot: what this team already knows here\n");
+                for m in &memory {
+                    ctx.push_str(&format!("- {m}\n"));
+                }
+                ctx.push_str(
+                    "These were written by your teammates. A line marked stale names who \
+                     changed the file since; check it before you rely on it.\n\n",
+                );
+            }
+
+            // Derived knowledge somebody already worked out. Anything whose
+            // files have moved has been dropped upstream rather than flagged:
+            // it was mechanical, it is now wrong, and it is cheap to redo.
+            if !cached.is_empty() {
+                ctx.push_str("knoot: already worked out here, so you need not\n");
+                for c in &cached {
+                    ctx.push_str(&format!("- {c}\n"));
+                }
+                ctx.push('\n');
+            }
+
             if !writes.is_empty() {
                 ctx.push_str("knoot: changed under you since your last turn\n");
-                for w in &writes {
-                    ctx.push_str(&format!("- {} wrote {}\n", w.user, w.path));
+                // Writes to files this session actually read come first and
+                // are marked. "The ground moved" matters most where the agent
+                // was standing, and until now the brief could not tell the
+                // difference between a file it had reasoned about and one it
+                // had never opened.
+                let mut ordered: Vec<&crate::proto::PeerWrite> = writes.iter().collect();
+                ordered.sort_by_key(|w| !depended_on.contains(&w.path));
+                for w in ordered {
+                    let mine = depended_on.contains(&w.path);
+                    ctx.push_str(&format!(
+                        "- {} wrote {}{}\n",
+                        w.user,
+                        w.path,
+                        if mine { "  ← you read this one; re-read it before you rely on it" } else { "" }
+                    ));
                 }
                 ctx.push_str(
                     "Re-read any of these you had already read; your notes on them may be stale.\n\n",
@@ -167,9 +268,14 @@ fn inner() {
                         .filter(|c| c.session == s.session)
                         .map(|c| c.path.as_str())
                         .collect();
+                    // A person in an editor is a different kind of peer: they
+                    // cannot be told to stop and re-plan, so the only useful
+                    // instruction is to work somewhere else.
+                    let human = crate::proto::is_human_session(&s.session);
                     ctx.push_str(&format!(
-                        "- {} on branch {} — {}{}{}\n",
+                        "- {}{} on branch {} — {}{}{}\n",
                         s.user,
+                        if human { " (a person in an editor, not an agent)" } else { "" },
                         s.branch,
                         intent,
                         if held.is_empty() {
@@ -188,6 +294,12 @@ fn inner() {
                     "Avoid editing files they are working in; you will be blocked with details if \
                      you try, and told automatically when a file you were blocked on is released.\n",
                 );
+                if sessions.iter().any(|s| crate::proto::is_human_session(&s.session)) {
+                    ctx.push_str(
+                        "One of them is a person, not an agent. Do not ask them to release a \
+                         file and do not wait on them — pick different work.\n",
+                    );
+                }
             }
 
             if ctx.is_empty() {
@@ -198,7 +310,9 @@ fn inner() {
             // short: the rest of this context arrived on its own.
             ctx.push_str(
                 "To reply or to tell peers you have finished something they are waiting on: \
-                 knoot msg <user|all> \"text\"",
+                 knoot msg <user|all> \"text\"\n\
+                 To tell them what you are about to do, so nobody duplicates it: \
+                 knoot plan --path <file> \"what you are doing\"",
             );
 
             let out = json!({
@@ -208,6 +322,16 @@ fn inner() {
         }
         _ => {}
     }
+}
+
+/// The path a read tool looked at. Separate from `file_path_of` because the
+/// set of tools is different and a read must never be mistaken for a write.
+fn read_path_of(v: &Value) -> Option<String> {
+    let ti = &v["tool_input"];
+    ti["file_path"]
+        .as_str()
+        .or_else(|| ti["notebook_path"].as_str())
+        .map(str::to_string)
 }
 
 fn file_path_of(v: &Value) -> Option<String> {

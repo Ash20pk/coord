@@ -707,6 +707,55 @@ async fn an_unpredictable_bash_write_is_detected_after_the_fact() {
         }
     }
     assert!(found, "an ungated write over a peer's claim must be recorded");
+
+    // And *both* sides must be told, at their next boundary. An interpreter
+    // write cannot be predicted — `python3 -c "open(...)"` is a program, not a
+    // command line — so this path will always exist. What it must never be is
+    // silent: the promise that lets a team turn off worktrees is not "nothing
+    // can go wrong", it is "nothing goes wrong without you hearing about it".
+    let mut holder_told = String::new();
+    let mut writer_told = String::new();
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if holder_told.is_empty() {
+            if let Some(DResp::Mail { items }) = ask(
+                &sock,
+                DReq::Poll {
+                    repo_root: root.to_string_lossy().to_string(),
+                    user: whoami_for_test(),
+                },
+            )
+            .await
+            {
+                for m in items {
+                    if m.contains("while you held it") {
+                        holder_told = m;
+                    } else if m.contains("which") && m.contains("is holding") {
+                        writer_told = m;
+                    }
+                }
+            }
+        }
+        if !holder_told.is_empty() && !writer_told.is_empty() {
+            break;
+        }
+    }
+    assert!(
+        holder_told.contains("src/auth.ts") && holder_told.contains("Re-read the file"),
+        "the holder must be told their file was written under them: {holder_told:?}"
+    );
+    assert!(
+        writer_told.contains("src/auth.ts") && writer_told.contains("not gated"),
+        "and the writer must be told they may have overwritten somebody: {writer_told:?}"
+    );
+}
+
+/// Both sessions here belong to one person, because `hook` sets no
+/// `KNOOT_USER` and the hook subprocess runs with `USER=testuser`. That is
+/// also the right shape for this test: one person's two agents colliding is
+/// the ordinary case, and both halves of the news belong in their mailbox.
+fn whoami_for_test() -> String {
+    "testuser".into()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

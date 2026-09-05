@@ -26,6 +26,26 @@ pub struct Team {
     pub name: String,
 }
 
+/// A signed-in person and the team they belong to.
+///
+/// The team alone was enough while the console only read a log. It stops being
+/// enough once rooms decide what a person may enter and once a memory shard
+/// records who wrote it: the relay needs the email and the role too, and it
+/// must get them from Supabase rather than from the browser.
+#[derive(Clone, Debug)]
+pub struct Principal {
+    pub team: Team,
+    pub user_id: String,
+    pub email: String,
+    /// `owner` | `admin` | `member`, as `team_members.role` has it.
+    pub role: String,
+}
+
+/// Verified access tokens, and what they resolved to. A `None` is a cached
+/// refusal, which matters as much as a cached success: without it a stale
+/// console tab retrying becomes a request amplifier against the auth endpoint.
+type VerifiedCache = HashMap<String, (Instant, Option<Principal>)>;
+
 #[derive(Clone)]
 pub struct Cloud {
     url: String,
@@ -35,7 +55,7 @@ pub struct Cloud {
     /// `service_role` JWT.
     secret_key: String,
     http: reqwest::Client,
-    cache: std::sync::Arc<Mutex<HashMap<String, (Instant, Option<Team>)>>>,
+    cache: std::sync::Arc<Mutex<VerifiedCache>>,
 }
 
 impl Cloud {
@@ -98,20 +118,25 @@ impl Cloud {
     /// inventing a team here would let the console diverge from the database
     /// that owns team membership.
     pub async fn team_for_token(&self, access_token: &str) -> Option<Team> {
-        if let Some((at, team)) = self.cache.lock().unwrap().get(access_token) {
+        self.principal_for_token(access_token).await.map(|p| p.team)
+    }
+
+    /// Verify an access token and resolve the person and team it speaks for.
+    pub async fn principal_for_token(&self, access_token: &str) -> Option<Principal> {
+        if let Some((at, who)) = self.cache.lock().unwrap().get(access_token) {
             if at.elapsed() < TTL {
-                return team.clone();
+                return who.clone();
             }
         }
-        let team = self.lookup(access_token).await;
+        let who = self.lookup(access_token).await;
         self.cache
             .lock()
             .unwrap()
-            .insert(access_token.to_string(), (Instant::now(), team.clone()));
-        team
+            .insert(access_token.to_string(), (Instant::now(), who.clone()));
+        who
     }
 
-    async fn lookup(&self, access_token: &str) -> Option<Team> {
+    async fn lookup(&self, access_token: &str) -> Option<Principal> {
         let user = self
             .http
             .get(format!("{}/auth/v1/user", self.url))
@@ -128,13 +153,16 @@ impl Cloud {
         }
         let user: serde_json::Value = user.json().await.ok()?;
         let user_id = user.get("id")?.as_str()?.to_string();
+        // Supabase's own record of the address, never the browser's claim
+        // about it: this becomes the authorship string on every event.
+        let auth_email = user.get("email").and_then(|e| e.as_str()).map(str::to_string);
 
         // The secret key is used only here, for a read keyed by the user id we
         // just proved. It never reaches the browser.
         let req = self
             .http
             .get(format!(
-                "{}/rest/v1/team_members?user_id=eq.{}&select=team_id,teams(name)&limit=1",
+                "{}/rest/v1/team_members?user_id=eq.{}&select=team_id,email,role,teams(name)&limit=1",
                 self.url, user_id
             ))
             .header("apikey", &self.secret_key);
@@ -160,7 +188,17 @@ impl Cloud {
             .and_then(|n| n.as_str())
             .unwrap_or("team")
             .to_string();
-        Some(Team { id, name })
+        let email = row
+            .get("email")
+            .and_then(|e| e.as_str())
+            .map(str::to_string)
+            .or(auth_email)?;
+        let role = row
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("member")
+            .to_string();
+        Some(Principal { team: Team { id, name }, user_id, email, role })
     }
 }
 
@@ -188,7 +226,7 @@ mod tests {
                     .and_then(|v| v.to_str().ok())
                     == Some("Bearer good.token.sig");
                 if ok {
-                    Json(serde_json::json!({ "id": "user-1" })).into_response()
+                    Json(serde_json::json!({ "id": "user-1", "email": "ash@example.com" })).into_response()
                 } else {
                     (axum::http::StatusCode::UNAUTHORIZED, "no").into_response()
                 }
@@ -205,7 +243,12 @@ mod tests {
                             .map(|v| v.to_str().unwrap().to_string()),
                     );
                     Json(serde_json::json!([
-                        { "team_id": "team-abc", "teams": { "name": "Platform team" } }
+                        {
+                            "team_id": "team-abc",
+                            "email": "ash@example.com",
+                            "role": "admin",
+                            "teams": { "name": "Platform team" }
+                        }
                     ]))
                 }
             }));
@@ -248,6 +291,18 @@ mod tests {
         let team = cloud.team_for_token("good.token.sig").await.expect("should resolve");
         assert_eq!(team.id, "team-abc");
         assert_eq!(team.name, "Platform team");
+    }
+
+    /// Rooms and memory provenance both need the person, not just the team,
+    /// and both must get them from Supabase rather than from the browser.
+    #[tokio::test]
+    async fn a_valid_access_token_resolves_to_the_person_behind_it() {
+        let cloud = Cloud::for_test(&stub().await, "sb_secret_abcdef123456");
+        let who = cloud.principal_for_token("good.token.sig").await.expect("should resolve");
+        assert_eq!(who.email, "ash@example.com");
+        assert_eq!(who.user_id, "user-1");
+        assert_eq!(who.role, "admin");
+        assert_eq!(who.team.id, "team-abc");
     }
 
     #[tokio::test]

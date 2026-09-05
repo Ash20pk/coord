@@ -94,6 +94,7 @@ async fn loser_receives_holder_identity_and_intent() {
         path: "src/auth.ts".into(),
         intent: "add logging".into(),
         branch: String::new(),
+        hub: false,
     })
     .await;
 
@@ -168,7 +169,7 @@ async fn late_joiner_receives_existing_claims_in_welcome() {
     // A fresh connection must be told the current state, not an empty one.
     let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
     use futures_util::{SinkExt, StreamExt};
-    let hello = ClientMsg::Hello { repo: "welcome".into(), daemon: "late".into() };
+    let hello = ClientMsg::Hello { repo: "welcome".into(), daemon: "late".into(), areas: Vec::new() };
     ws.send(tokio_tungstenite::tungstenite::Message::Text(
         serde_json::to_string(&hello).unwrap(),
     ))
@@ -177,7 +178,7 @@ async fn late_joiner_receives_existing_claims_in_welcome() {
 
     loop {
         if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) = ws.next().await {
-            if let Ok(ServerMsg::Welcome { claims, sessions, seq }) = serde_json::from_str(&t) {
+            if let Ok(ServerMsg::Welcome { claims, sessions, seq, .. }) = serde_json::from_str(&t) {
                 assert!(seq > 0, "sequencer must have advanced");
                 assert_eq!(claims.len(), 1);
                 assert_eq!(claims[0].path, "src/auth.ts");
@@ -244,6 +245,7 @@ async fn the_relay_denies_with_the_holders_current_intent() {
             path: "src/db.ts".into(),
             intent: String::new(),
             branch: "main".into(),
+            hub: false,
         })
         .await;
     match holder.claim_resp(&hid).await {
@@ -271,6 +273,7 @@ async fn the_relay_denies_with_the_holders_current_intent() {
         path: "src/db.ts".into(),
         intent: "add refreshSession".into(),
         branch: "main".into(),
+        hub: false,
     })
     .await;
 

@@ -16,6 +16,24 @@ struct RepoState {
     view: View,
     seq: u64,
     tx: broadcast::Sender<(u64, Event)>,
+    /// How this repo divides itself into areas, as last declared by a client
+    /// in its Hello.
+    ///
+    /// The relay never sees the repo, so this is the only way it can learn
+    /// the map — and it needs the map, because an event's area decides who
+    /// hears about it and every connection must agree on the answer. Empty
+    /// until some client says otherwise, which is the whole repo in `/`:
+    /// exactly the behaviour of every repo before areas existed.
+    areas: Vec<crate::config::AreaDef>,
+    /// Shards published on this repo, fanned out to the connections whose keys
+    /// hold the scope. Separate from the event channel because a shard is not
+    /// an event: it is not sequenced with the log, and a client that ignores
+    /// memory entirely must not have to skip past it.
+    mem_tx: broadcast::Sender<crate::memory::Shard>,
+    /// Shards that have been deleted, fanned out as ids. Ids only: a client
+    /// that never held the shard has nothing to drop, and one that did knows
+    /// what it is dropping.
+    forget_tx: broadcast::Sender<Vec<String>>,
 }
 
 struct App {
@@ -35,6 +53,21 @@ struct App {
     /// Supabase, when this relay is attached to a project. `None` on a
     /// self-hosted relay, where agent tokens are the only credential.
     cloud: Option<crate::cloud::Cloud>,
+    /// Which key provider this deployment seals memory with — `plaintext` for
+    /// a relay inside a customer's own network, `mls` for one that hosts other
+    /// people's rooms. The relay decides because sealing is a property of the
+    /// deployment, and a client that chose for itself could seal shards
+    /// nobody else could open.
+    provider: String,
+    /// Rooms whose handshake log just grew. Carries the room id and nothing
+    /// else: a daemon told its room moved asks for the log itself, so the
+    /// relay never has to decide who may see which blob on a fan-out.
+    ///
+    /// On the app, not on a repo: a **room spans repos**. Keying this per repo
+    /// meant a commit made while working in one repo never woke the daemons
+    /// that were in the same room but a different one, and their group never
+    /// formed.
+    mls_tx: broadcast::Sender<String>,
 }
 
 impl App {
@@ -94,6 +127,9 @@ impl App {
             view: View::default(),
             seq: 0,
             tx: broadcast::channel(4096).0,
+            areas: Vec::new(),
+            mem_tx: broadcast::channel(256).0,
+            forget_tx: broadcast::channel(256).0,
         };
         let db = self.db.lock().unwrap();
         st.seq = db
@@ -184,6 +220,20 @@ async fn prepare_with_token(
         CREATE INDEX IF NOT EXISTS idx_events_repo_seq ON events (repo, seq);",
     )?;
     crate::teams::init_schema(&conn)?;
+    crate::rooms::init_schema(&conn)?;
+    crate::memory::init_schema(&conn)?;
+    crate::mls::init_schema(&conn)?;
+    // Every start, not once: a relay can be downgraded and upgraded again, and
+    // the migration is keyed on `token_hash`, so running it is free when there
+    // is nothing to bring forward.
+    match crate::rooms::migrate_tokens(&conn) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("knoot relay: brought {n} pre-member key(s) forward as devices"),
+        // A relay that cannot migrate must still start: the old `tokens` rows
+        // are untouched and the operator can be told, but refusing to serve
+        // would take coordination down for everyone.
+        Err(e) => eprintln!("knoot relay: could not migrate old keys ({e}) — they will not resolve"),
+    }
     let app = Arc::new(App {
         repos: Mutex::new(HashMap::new()),
         db: Mutex::new(conn),
@@ -191,9 +241,25 @@ async fn prepare_with_token(
         token,
         reg_limit: crate::teams::RateLimit::new(5, 60 * 60 * 1000),
         cloud: crate::cloud::Cloud::from_env(),
+        provider: key_provider_name(),
+        mls_tx: broadcast::channel(256).0,
     });
     let listener = tokio::net::TcpListener::bind(listen).await?;
     Ok((listener, app))
+}
+
+/// Which provider this deployment seals memory with.
+///
+/// `plaintext` is the default and is right for the deployment that ships
+/// first: a relay in the customer's own network, where the org is the trust
+/// boundary. `mls` is the hosted tier, where it is not. Naming it in the
+/// environment rather than inferring it means a relay never quietly changes
+/// what it promises about its own storage.
+fn key_provider_name() -> String {
+    match crate::config::env_or_legacy("KNOOT_KEY_PROVIDER").as_deref() {
+        Some(crate::proto::PROVIDER_MLS) => crate::proto::PROVIDER_MLS.into(),
+        _ => crate::proto::PROVIDER_PLAINTEXT.into(),
+    }
 }
 
 /// Durability settings for the event log.
@@ -390,19 +456,30 @@ async fn identify(
         // turning into a puzzling network error.
         if let Some(cloud) = &app.cloud {
             if crate::cloud::Cloud::looks_like_jwt(t) {
-                if let Some(team) = cloud.team_for_token(t).await {
+                if let Some(who) = cloud.principal_for_token(t).await {
                     // The team owns rows in the local database too: repo keys
-                    // are namespaced by it, and minted tokens point at it.
-                    {
-                        let db = app.db.lock().unwrap();
-                        crate::teams::ensure_team(&db, &team.id, &team.name);
-                    }
+                    // are namespaced by it, and devices point at it. So does
+                    // the person — rooms are enforced here, so the relay keeps
+                    // its own row per member, refreshed on every console call.
+                    let db = app.db.lock().unwrap();
+                    crate::teams::ensure_team(&db, &who.team.id, &who.team.name);
+                    let member = crate::rooms::ensure_member(
+                        &db,
+                        &who.team.id,
+                        &who.email,
+                        Some(&who.user_id),
+                        &who.role,
+                    )
+                    .ok()?;
+                    let areas = crate::rooms::areas_for_member(&db, &member.id);
                     return Some(crate::teams::Identity {
-                        team_id: team.id,
-                        team_name: team.name,
-                        // A person is not a token. Nothing in the console is
-                        // "this machine", so no token row is marked as used.
+                        team_id: who.team.id,
+                        team_name: who.team.name,
+                        // A person is not a machine. Nothing in the console is
+                        // "this device", so no device row is marked as used.
                         token_id: String::new(),
+                        member,
+                        areas,
                     });
                 }
                 return None;
@@ -413,11 +490,7 @@ async fn identify(
     match (&app.token, tok.as_deref()) {
         // A configured secret, presented correctly.
         (Some(expected), Some(got)) if token_matches(expected, got) => {
-            Some(crate::teams::Identity {
-                team_id: "root".into(),
-                team_name: "root".into(),
-                token_id: "root".into(),
-            })
+            Some(legacy_identity(app, "root"))
         }
         // A configured secret, and this is not it.
         (Some(_), _) => None,
@@ -430,11 +503,32 @@ async fn identify(
         (None, Some(_)) => None,
         // No secret configured and nothing presented: an open relay, which is
         // what makes a loopback relay work with no setup at all.
-        (None, None) => Some(crate::teams::Identity {
-            team_id: "local".into(),
-            team_name: "local".into(),
-            token_id: "local".into(),
-        }),
+        (None, None) => Some(legacy_identity(app, "local")),
+    }
+}
+
+/// The `root` and `local` identities: a relay with a shared secret in its
+/// environment, and a loopback relay with no setup at all. Both keep working
+/// exactly as they did — that is the fail-open, works-unconfigured property
+/// the whole product rests on — and both get a `general` room over every repo
+/// so nothing downstream has to special-case "an identity with no areas".
+///
+/// The member is named rather than blank so provenance is never empty, but it
+/// is not *verified*: `attribute_to` is called with `None` for these, and the
+/// client's own authorship string stands.
+fn legacy_identity(app: &App, who: &str) -> crate::teams::Identity {
+    let areas = {
+        let db = app.db.lock().unwrap();
+        crate::teams::ensure_team(&db, who, who);
+        let _ = crate::rooms::general_room(&db, who);
+        vec![crate::rooms::Area::everything()]
+    };
+    crate::teams::Identity {
+        team_id: who.into(),
+        team_name: who.into(),
+        token_id: who.into(),
+        member: crate::rooms::Member::legacy(who),
+        areas,
     }
 }
 
@@ -520,8 +614,17 @@ fn routes(app: Arc<App>) -> Router {
         .route("/api/events", get(events_handler))
         .route("/api/register", axum::routing::post(register_handler))
         .route("/api/team", get(team_handler))
+        .route("/api/whoami", get(whoami_handler))
         .route("/api/tokens", axum::routing::post(mint_handler))
         .route("/api/tokens/:id/revoke", axum::routing::post(revoke_handler))
+        .route("/api/members", axum::routing::post(add_member_handler))
+        .route("/api/members/attach", axum::routing::post(attach_handler))
+        .route("/api/members/:id/remove", axum::routing::post(remove_member_handler))
+        .route("/api/rooms", axum::routing::post(create_room_handler))
+        .route("/api/rooms/:id/delete", axum::routing::post(delete_room_handler))
+        .route("/api/rooms/:id/areas", axum::routing::post(room_area_handler))
+        .route("/api/rooms/:id/members", axum::routing::post(room_member_handler))
+        .route("/api/rooms/:id/policy", axum::routing::post(room_policy_handler))
         .route("/ws", get(ws_handler))
         .with_state(app)
 }
@@ -529,6 +632,11 @@ fn routes(app: Arc<App>) -> Router {
 #[derive(serde::Deserialize)]
 struct RegisterBody {
     team: String,
+    /// Optional, and only ever used to name the team's first member. Open
+    /// registration asks for nothing; a caller that already knows who is
+    /// registering can say so and get a real member instead of a placeholder.
+    #[serde(default)]
+    email: Option<String>,
 }
 
 /// Open registration: a name in, a team and its first token out. No email, no
@@ -549,7 +657,7 @@ async fn register_handler(
             .into_response();
     }
     let db = app.db.lock().unwrap();
-    match crate::teams::create_team(&db, &body.team) {
+    match crate::teams::create_team(&db, &body.team, body.email.as_deref()) {
         Ok((id, tok)) => Json(serde_json::json!({
             "team_id": id.team_id,
             "team": id.team_name,
@@ -575,13 +683,53 @@ async fn team_handler(
         return unauthorized();
     };
     let db = app.db.lock().unwrap();
-    let tokens = crate::teams::list_tokens(&db, &id.team_id);
+    let devices = crate::rooms::list_devices(&db, &id.team_id);
     Json(serde_json::json!({
         "team_id": id.team_id,
         "team": id.team_name,
         "token_id": id.token_id,
-        "tokens": tokens,
+        "me": me(&id),
+        // `tokens` is the name the console has always read. Devices are the
+        // same rows with an owner, so the key stays and the shape grows.
+        "tokens": devices,
+        "members": crate::rooms::list_members(&db, &id.team_id),
+        "rooms": crate::rooms::list_rooms(&db, &id.team_id),
         "repos": repos_for(&app, &db, &id),
+    }))
+    .into_response()
+}
+
+/// Who the caller is, as the relay verified it — not as the client described
+/// itself. `knoot join` prints this, and the console shows it so a person can
+/// see which member their console session speaks for.
+fn me(id: &crate::teams::Identity) -> serde_json::Value {
+    serde_json::json!({
+        "member_id": id.member.id,
+        "email": id.member.email,
+        "role": id.member.role,
+        "unassigned": id.member.unassigned,
+        "device_id": id.token_id,
+        "areas": id.areas,
+    })
+}
+
+async fn whoami_handler(
+    State(app): State<Arc<App>>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
+        return unauthorized();
+    };
+    let rooms = {
+        let db = app.db.lock().unwrap();
+        crate::rooms::rooms_for_member(&db, &id.member.id)
+    };
+    Json(serde_json::json!({
+        "team_id": id.team_id,
+        "team": id.team_name,
+        "me": me(&id),
+        "rooms": rooms,
     }))
     .into_response()
 }
@@ -590,6 +738,51 @@ async fn team_handler(
 struct MintBody {
     #[serde(default)]
     label: String,
+    /// Which member the key belongs to. Omitted means the caller — the common
+    /// case, a person adding a second machine of their own.
+    #[serde(default)]
+    member: Option<String>,
+}
+
+/// Refusal for the two identities whose credential lives in the environment
+/// rather than in the database. Nothing about them is editable here, and the
+/// old message said exactly that; it now covers members and rooms too.
+fn not_in_the_database() -> axum::response::Response {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": "this relay's credential is configured in its environment, not in the \
+                      database. Register a team to manage members, keys and rooms here."
+        })),
+    )
+        .into_response()
+}
+
+fn env_identity(id: &crate::teams::Identity) -> bool {
+    id.team_id == "local" || id.team_id == "root"
+}
+
+/// Only an owner or an admin may change who is in a team or a room. A member
+/// can still mint a key for their own machines, which is the one write that
+/// does not widen anybody's access.
+fn admin(id: &crate::teams::Identity) -> bool {
+    id.member.role == "owner" || id.member.role == "admin"
+}
+
+fn forbidden(what: &str) -> axum::response::Response {
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        Json(serde_json::json!({ "error": format!("only an owner or admin can {what}") })),
+    )
+        .into_response()
+}
+
+fn bad(e: impl std::fmt::Display) -> axum::response::Response {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": e.to_string() })),
+    )
+        .into_response()
 }
 
 async fn mint_handler(
@@ -601,30 +794,115 @@ async fn mint_handler(
     let Some(id) = identify(&app, &headers, uri.query()).await else {
         return unauthorized();
     };
-    if id.team_id == "local" || id.team_id == "root" {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "this relay's token is configured in its environment, not in the \
-                          database. Register a team to manage tokens here."
-            })),
-        )
-            .into_response();
+    if env_identity(&id) {
+        return not_in_the_database();
+    }
+    let member = body.member.unwrap_or_else(|| id.member.id.clone());
+    // Minting for someone else hands out a key that speaks as them, so it is
+    // an admin action even though minting for yourself is not.
+    if member != id.member.id && !admin(&id) {
+        return forbidden("mint a key for another member");
     }
     let db = app.db.lock().unwrap();
-    match crate::teams::mint_token(&db, &id.team_id, &body.label) {
-        Ok(t) => Json(serde_json::json!({ "token": t.secret, "token_id": t.id })).into_response(),
-        Err(e) => (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
+    match crate::rooms::mint_device(&db, &id.team_id, &member, &body.label) {
+        Ok(t) => Json(serde_json::json!({ "token": t.secret, "token_id": t.id, "member": member }))
             .into_response(),
+        Err(e) => bad(e),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct AddMemberBody {
+    email: String,
+    /// `member` or `admin`. Not `owner`: there is exactly one, made at
+    /// registration, and this call is for adding colleagues rather than
+    /// handing over the team.
+    #[serde(default = "member_role")]
+    role: String,
+    /// Mint their first device key at the same time, labelled with the
+    /// machine it is for.
+    ///
+    /// Two calls would be tidier, and one is what the situation actually
+    /// needs: on a self-hosted relay there is no email to send an invitation
+    /// to, so "add a colleague" means "give me a key I can pass to them".
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// Create a member. The call a self-hosted relay had no way to make.
+///
+/// Until now a second *person* could only come into being through Supabase —
+/// `invite_member` and `accept_invite` — so a relay running with no cloud
+/// could mint as many keys as it liked and every one of them named the same
+/// human. Rooms, areas and memory provenance are all about *who*, which made
+/// this the gap under three phases of work: the tests for areas, memory and
+/// MLS each had to reach into the relay's database to invent a colleague.
+///
+/// Idempotent on the email, and it never changes an existing member's role:
+/// `ensure_member` would happily rewrite it, which would let "add
+/// ash@example.com as a member" quietly demote the owner. Changing a role is a
+/// different operation and does not exist yet; it is not smuggled in here.
+async fn add_member_handler(
+    State(app): State<Arc<App>>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+    Json(body): Json<AddMemberBody>,
+) -> axum::response::Response {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
+        return unauthorized();
+    };
+    if env_identity(&id) {
+        return not_in_the_database();
+    }
+    if !admin(&id) {
+        return forbidden("add a member");
+    }
+    let email = body.email.trim().to_lowercase();
+    if !email.contains('@') || email.len() < 3 {
+        return bad("that is not an email address");
+    }
+    if !matches!(body.role.as_str(), "member" | "admin") {
+        return bad("a role is `member` or `admin`");
+    }
+
+    let db = app.db.lock().unwrap();
+    // Already here: hand back who they are and change nothing.
+    if let Some(existing) = crate::rooms::member_by_email(&db, &id.team_id, &email) {
+        return Json(serde_json::json!({
+            "member": existing.id,
+            "email": existing.email,
+            "role": existing.role,
+            "existing": true,
+        }))
+        .into_response();
+    }
+    let member = match crate::rooms::ensure_member(&db, &id.team_id, &email, None, &body.role) {
+        Ok(m) => m,
+        Err(e) => return bad(e),
+    };
+    // The key, if one was asked for. Returned once and never stored in the
+    // clear, exactly as `/api/tokens` does it.
+    let minted = match &body.label {
+        Some(label) => match crate::rooms::mint_device(&db, &id.team_id, &member.id, label) {
+            Ok(t) => Some(t),
+            Err(e) => return bad(e),
+        },
+        None => None,
+    };
+    Json(serde_json::json!({
+        "member": member.id,
+        "email": member.email,
+        "role": member.role,
+        "existing": false,
+        "token": minted.as_ref().map(|t| t.secret.clone()),
+        "token_id": minted.as_ref().map(|t| t.id.clone()),
+    }))
+    .into_response()
 }
 
 async fn revoke_handler(
     State(app): State<Arc<App>>,
-    AxPath(token_id): AxPath<String>,
+    AxPath(device_id): AxPath<String>,
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> axum::response::Response {
@@ -632,13 +910,263 @@ async fn revoke_handler(
         return unauthorized();
     };
     let db = app.db.lock().unwrap();
-    match crate::teams::revoke(&db, &id.team_id, &token_id) {
-        Ok(()) => Json(serde_json::json!({ "revoked": token_id })).into_response(),
-        Err(e) => (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
+    // A person may always kill their own machine's key — a stolen laptop must
+    // not wait for an admin — but not somebody else's.
+    let owner = crate::rooms::list_devices(&db, &id.team_id)
+        .into_iter()
+        .find(|d| d.id == device_id)
+        .map(|d| d.member_id);
+    if owner.as_deref() != Some(id.member.id.as_str()) && !admin(&id) {
+        return forbidden("revoke another member's key");
+    }
+    let owner_member = crate::rooms::list_devices(&db, &id.team_id)
+        .into_iter()
+        .find(|d| d.id == device_id)
+        .map(|d| d.member_id);
+    let r = crate::rooms::revoke_device(&db, &id.team_id, &device_id);
+    let rooms = owner_member
+        .map(|m| crate::rooms::rooms_of_member(&db, &m))
+        .unwrap_or_default();
+    drop(db);
+    match r {
+        Ok(()) => {
+            // A revoked laptop must leave the groups it was a leaf in, or the
+            // key it already holds still opens everything the room writes.
+            for room in rooms {
+                let _ = app.mls_tx.send(room);
+            }
+            Json(serde_json::json!({ "revoked": device_id })).into_response()
+        }
+        Err(e) => bad(e),
+    }
+}
+
+// ------------------------------------------------------------- members
+
+#[derive(serde::Deserialize)]
+struct AttachBody {
+    /// The migrated, unassigned member whose keys are being adopted.
+    from: String,
+    /// The real person taking them over. Omitted means the caller.
+    #[serde(default)]
+    to: Option<String>,
+}
+
+/// Adopt a pre-member key. The console shows migrated keys as "unassigned";
+/// this is the button that turns one into a named person's device.
+async fn attach_handler(
+    State(app): State<Arc<App>>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+    Json(body): Json<AttachBody>,
+) -> axum::response::Response {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
+        return unauthorized();
+    };
+    if env_identity(&id) {
+        return not_in_the_database();
+    }
+    let to = body.to.unwrap_or_else(|| id.member.id.clone());
+    if to != id.member.id && !admin(&id) {
+        return forbidden("attach a key to another member");
+    }
+    let db = app.db.lock().unwrap();
+    match crate::rooms::attach_devices(&db, &id.team_id, &body.from, &to) {
+        Ok(n) => Json(serde_json::json!({ "attached": n, "member": to })).into_response(),
+        Err(e) => bad(e),
+    }
+}
+
+async fn remove_member_handler(
+    State(app): State<Arc<App>>,
+    AxPath(member_id): AxPath<String>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
+        return unauthorized();
+    };
+    if env_identity(&id) {
+        return not_in_the_database();
+    }
+    if !admin(&id) {
+        return forbidden("remove a member");
+    }
+    let removed = {
+        let db = app.db.lock().unwrap();
+        crate::rooms::remove_member(&db, &id.team_id, &member_id)
+    };
+    match removed {
+        Ok(rooms) => {
+            // Every room they were in is now in the wrong epoch. Waking them
+            // is what makes a departure actually rotate a key rather than
+            // leave the room sealed under one the departed laptop holds.
+            for room in rooms {
+                let _ = app.mls_tx.send(room);
+            }
+            Json(serde_json::json!({ "removed": member_id })).into_response()
+        }
+        Err(e) => bad(e),
+    }
+}
+
+// --------------------------------------------------------------- rooms
+
+#[derive(serde::Deserialize)]
+struct RoomBody {
+    name: String,
+}
+
+async fn create_room_handler(
+    State(app): State<Arc<App>>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+    Json(body): Json<RoomBody>,
+) -> axum::response::Response {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
+        return unauthorized();
+    };
+    if env_identity(&id) {
+        return not_in_the_database();
+    }
+    if !admin(&id) {
+        return forbidden("create a room");
+    }
+    let db = app.db.lock().unwrap();
+    match crate::rooms::create_room(&db, &id.team_id, &body.name) {
+        Ok(room) => Json(serde_json::json!({ "room": room })).into_response(),
+        Err(e) => bad(e),
+    }
+}
+
+async fn delete_room_handler(
+    State(app): State<Arc<App>>,
+    AxPath(room): AxPath<String>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
+        return unauthorized();
+    };
+    if !admin(&id) {
+        return forbidden("delete a room");
+    }
+    let db = app.db.lock().unwrap();
+    match crate::rooms::delete_room(&db, &id.team_id, &room) {
+        Ok(()) => Json(serde_json::json!({ "deleted": room })).into_response(),
+        Err(e) => bad(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AreaBody {
+    /// A team-local repo id, or `*` for every repo in the team.
+    repo: String,
+    /// A path prefix, or `/` for the whole repo.
+    #[serde(default = "root_area")]
+    area: String,
+    /// True to take the area out of the room again.
+    #[serde(default)]
+    remove: bool,
+}
+
+fn root_area() -> String {
+    "/".into()
+}
+
+async fn room_area_handler(
+    State(app): State<Arc<App>>,
+    AxPath(room): AxPath<String>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+    Json(body): Json<AreaBody>,
+) -> axum::response::Response {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
+        return unauthorized();
+    };
+    if !admin(&id) {
+        return forbidden("change a room's areas");
+    }
+    let db = app.db.lock().unwrap();
+    let r = if body.remove {
+        crate::rooms::remove_area(&db, &id.team_id, &room, &body.repo, &body.area)
+    } else {
+        crate::rooms::add_area(&db, &id.team_id, &room, &body.repo, &body.area)
+    };
+    match r {
+        Ok(()) => Json(serde_json::json!({ "room": room, "repo": body.repo, "area": body.area }))
             .into_response(),
+        Err(e) => bad(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RoomMemberBody {
+    member: String,
+    #[serde(default = "member_role")]
+    role: String,
+    #[serde(default)]
+    remove: bool,
+}
+
+fn member_role() -> String {
+    "member".into()
+}
+
+async fn room_member_handler(
+    State(app): State<Arc<App>>,
+    AxPath(room): AxPath<String>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+    Json(body): Json<RoomMemberBody>,
+) -> axum::response::Response {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
+        return unauthorized();
+    };
+    if !admin(&id) {
+        return forbidden("change who is in a room");
+    }
+    let db = app.db.lock().unwrap();
+    let r = if body.remove {
+        crate::rooms::remove_room_member(&db, &id.team_id, &room, &body.member)
+    } else {
+        crate::rooms::add_member(&db, &id.team_id, &room, &body.member, &body.role)
+    };
+    drop(db);
+    match r {
+        Ok(()) => {
+            // The room's membership just changed, so its MLS group is now
+            // wrong: somebody is in it who should not be, or is missing.
+            // Waking the room is what turns an admin's click into a key
+            // rotation — without it a removal sat there until an unrelated
+            // commit happened to move the group.
+            let _ = app.mls_tx.send(room.clone());
+            Json(serde_json::json!({ "room": room, "member": body.member })).into_response()
+        }
+        Err(e) => bad(e),
+    }
+}
+
+/// The room's memory policy (§4.4 of the multiplayer design). Stored now,
+/// read in phase 4 — an admin editing it before memory exists changes nothing,
+/// which is better than a migration later.
+async fn room_policy_handler(
+    State(app): State<Arc<App>>,
+    AxPath(room): AxPath<String>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+    Json(policy): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let Some(id) = identify(&app, &headers, uri.query()).await else {
+        return unauthorized();
+    };
+    if !admin(&id) {
+        return forbidden("change a room's memory policy");
+    }
+    let db = app.db.lock().unwrap();
+    match crate::rooms::set_policy(&db, &id.team_id, &room, &policy) {
+        Ok(()) => Json(serde_json::json!({ "room": room })).into_response(),
+        Err(e) => bad(e),
     }
 }
 
@@ -781,6 +1309,12 @@ struct EventsQuery {
     repo: String,
     #[serde(default)]
     limit: Option<usize>,
+    /// Narrow to one file's story: everything about this path, plus the
+    /// session-level events — intents, messages — of the sessions that
+    /// touched it. Without them a claim is a timestamp and a name; with them
+    /// it is a reason.
+    #[serde(default)]
+    path: Option<String>,
 }
 
 /// Recent history, so the page is useful the moment it is opened rather than
@@ -797,13 +1331,16 @@ async fn events_handler(
     // The client asks for `api`; storage is keyed `t_xxxx/api`. A caller
     // cannot reach another team's log by naming it, because the name it sends
     // is always rewritten with its own team id.
-    let scoped = EventsQuery { repo: id.scope(&q.repo), limit: q.limit };
+    let scoped = EventsQuery { repo: id.scope(&q.repo), limit: q.limit, path: q.path };
     events_body(app, scoped).await.into_response()
 }
 
 async fn events_body(app: Arc<App>, q: EventsQuery) -> impl IntoResponse {
     let limit = q.limit.unwrap_or(400).min(2000);
     let db = app.db.lock().unwrap();
+    if let Some(path) = &q.path {
+        return Json(events_for_path(&db, &q.repo, path, limit));
+    }
     let mut out: Vec<serde_json::Value> = Vec::new();
     if let Ok(mut stmt) = db.prepare(
         "SELECT json FROM (SELECT seq, json FROM events WHERE repo = ?1 \
@@ -819,6 +1356,100 @@ async fn events_body(app: Arc<App>, q: EventsQuery) -> impl IntoResponse {
         }
     }
     Json(out)
+}
+
+/// One file's history: every event that names it, and the session-level
+/// events of whoever touched it.
+///
+/// The log has always held this and nothing ever answered a question about the
+/// past — the events were written and read only as a live tail. Two passes
+/// rather than one join, because the second pass's key is a set the first pass
+/// discovers, and a `LIKE` over a JSON column is not a thing to be clever
+/// with.
+fn events_for_path(
+    db: &rusqlite::Connection,
+    repo: &str,
+    path: &str,
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    let path = path.trim_start_matches('/');
+    // The exact JSON the writer emits. Matching on the quoted pair rather than
+    // the bare path is what stops `src/a.rs` finding `src/a.rs.bak` and what
+    // stops a path matching an intent that merely mentions it.
+    let needle = format!("\"path\":\"{path}\"");
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut sessions: std::collections::HashSet<String> = Default::default();
+    // Users as well as sessions: a message sent with `knoot msg` carries no
+    // session id, because a CLI caller cannot learn its own. Joining only on
+    // sessions dropped exactly the messages a person sent about the file.
+    let mut users: std::collections::HashSet<String> = Default::default();
+
+    if let Ok(mut q) = db.prepare(
+        "SELECT json FROM (SELECT seq, json FROM events \
+         WHERE repo = ?1 AND instr(json, ?2) > 0 ORDER BY seq DESC LIMIT ?3) ORDER BY seq ASC",
+    ) {
+        if let Ok(rows) = q.query_map(rusqlite::params![repo, needle, limit], |r| {
+            r.get::<_, String>(0)
+        }) {
+            for j in rows.flatten() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&j) {
+                    for key in ["session", "by_session", "from_session"] {
+                        if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+                            sessions.insert(s.to_string());
+                        }
+                    }
+                    for key in ["user", "holder_user", "peer_user", "by_user"] {
+                        if let Some(u) = v.get(key).and_then(|x| x.as_str()) {
+                            if !u.is_empty() {
+                                users.insert(u.to_string());
+                            }
+                        }
+                    }
+                    out.push(v);
+                }
+            }
+        }
+    }
+    if sessions.is_empty() && users.is_empty() {
+        return out;
+    }
+
+    // What those sessions said. Bounded by the same limit, because a chatty
+    // room should not be able to turn one question into the whole log.
+    if let Ok(mut q) = db.prepare(
+        "SELECT json FROM (SELECT seq, json FROM events WHERE repo = ?1 \
+         AND (instr(json, '\"type\":\"intent_declared\"') > 0 \
+              OR instr(json, '\"type\":\"message\"') > 0 \
+              OR instr(json, '\"type\":\"session_started\"') > 0) \
+         ORDER BY seq DESC LIMIT ?2) ORDER BY seq ASC",
+    ) {
+        if let Ok(rows) = q.query_map(rusqlite::params![repo, limit], |r| r.get::<_, String>(0)) {
+            for j in rows.flatten() {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&j) else { continue };
+                let by_session = ["session", "from_session"]
+                    .iter()
+                    .filter_map(|k| v.get(*k).and_then(|x| x.as_str()))
+                    .any(|s| sessions.contains(s));
+                // A message counts when either end of it is somebody who
+                // touched the file — including one addressed to `all`, which
+                // is how a person announces they are taking something.
+                let by_user = v.get("type").and_then(|t| t.as_str()) == Some("message")
+                    && (v
+                        .get("from_user")
+                        .and_then(|x| x.as_str())
+                        .is_some_and(|u| users.contains(u))
+                        || v.get("to").and_then(|x| x.as_str()).is_some_and(|u| users.contains(u))
+                        || v.get("to").is_some_and(|t| t.is_null()));
+                if by_session || by_user {
+                    out.push(v);
+                }
+            }
+        }
+    }
+    // Back into the order things happened. Two passes produce two runs; the
+    // reader wants one story.
+    out.sort_by_key(|v| v.get("ts").and_then(|t| t.as_u64()).unwrap_or(0));
+    out
 }
 
 async fn ws_handler(
@@ -848,22 +1479,144 @@ fn unauthorized() -> axum::response::Response {
         .into_response()
 }
 
+/// The memory scopes a key holds on this repo.
+///
+/// A grant of `/` — which `general` gives everyone — covers the repo, so it
+/// yields the root scope plus every declared area. A narrow grant yields only
+/// what it names. There is no wildcard at the storage layer: a scope is a
+/// string, and a key either holds it or does not.
+fn scopes_for(id: &crate::teams::Identity, repo_name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for a in &id.areas {
+        if a.repo != "*" && a.repo != repo_name {
+            continue;
+        }
+        out.push(
+            crate::memory::Scope {
+                team: id.team_id.clone(),
+                repo: repo_name.to_string(),
+                area: a.area.clone(),
+            }
+            .key(),
+        );
+    }
+    out
+}
+
+/// Take a published shard, or say why not.
+///
+/// Two checks, and the order matters. The author must be the member this key
+/// was minted for — provenance is the whole point of a shard, and a key that
+/// could write as a colleague makes every fact unattributable. The scope must
+/// be one this key may enter — the same grant that decides which events reach
+/// it. Neither is a rewrite: the seal already binds both, so a relay that
+/// "corrected" them would produce a shard nobody could open.
+fn accept_shard(
+    app: &Arc<App>,
+    repo_key: &str,
+    repo_name: &str,
+    id: &crate::teams::Identity,
+    shard: &crate::memory::Shard,
+) -> Result<()> {
+    anyhow::ensure!(
+        !id.member.unassigned && !id.member.id.is_empty(),
+        "this key names no verified person, so it may not publish memory"
+    );
+    anyhow::ensure!(
+        shard.author == id.member.id && shard.author_email == id.member.email,
+        "a shard's author must be the member the key was minted for"
+    );
+    anyhow::ensure!(
+        scopes_for(id, repo_name).contains(&shard.scope),
+        "this key does not hold that area"
+    );
+    let mut shard = shard.clone();
+    {
+        let db = app.db.lock().unwrap();
+        anyhow::ensure!(
+            crate::rooms::kind_enabled_for_scope(&db, &shard.scope, &shard.kind),
+            "a room over this area has {} turned off",
+            shard.kind
+        );
+        // Retention is the room's to decide, not the publisher's. It is not
+        // bound into the seal precisely so that a room can shorten it without
+        // making every shard unreadable.
+        if let Some(days) = crate::rooms::retain_days_for_scope(&db, &shard.scope, &shard.kind) {
+            shard.expires_ts = Some(shard.created_ts + days * 24 * 60 * 60 * 1000);
+        }
+        let budget = crate::rooms::budget_for_scope(&db, &shard.scope);
+        crate::memory::put(&db, &shard, budget)?;
+    }
+    // Everyone else in the area hears about it now, not at their next sync.
+    if let Some(st) = app.repos.lock().unwrap().get(repo_key) {
+        let _ = st.mem_tx.send(shard);
+    }
+    Ok(())
+}
+
+/// Whether an event reaches a connection, given the areas its key grants.
+///
+/// The map is read per event rather than captured at Hello so that a repo
+/// which re-divides itself takes effect on live connections, not only on ones
+/// opened afterwards.
+fn visible_to(
+    app: &Arc<App>,
+    repo_key: &str,
+    repo_name: &str,
+    id: &crate::teams::Identity,
+    event: &Event,
+) -> bool {
+    let Some(path) = event.path() else { return true };
+    let area = {
+        let repos = app.repos.lock().unwrap();
+        match repos.get(repo_key) {
+            Some(st) => crate::config::area_of(&st.areas, path),
+            None => return true,
+        }
+    };
+    id.may_enter(repo_name, &area)
+}
+
 async fn client(sock: WebSocket, app: Arc<App>, id: crate::teams::Identity) -> Result<()> {
     let (mut ws_tx, mut ws_rx) = sock.split();
 
+    // The author every event from this connection is stamped with, or `None`
+    // for an identity with no verified person behind it — a legacy shared
+    // secret, an unconfigured loopback relay, a migrated key nobody has
+    // attached yet. Resolved once per connection: it cannot change while the
+    // socket is open, because the key that opened it cannot change.
+    let author: Option<String> = (!id.member.unassigned
+        && id.member.email.contains('@'))
+        .then(|| id.member.email.clone());
+
     // First message must be Hello.
-    let repo = loop {
+    let (repo, repo_name, declared) = loop {
         match ws_rx.next().await {
             Some(Ok(Message::Text(t))) => match serde_json::from_str::<ClientMsg>(&t)? {
                 // Namespaced here, once, so nothing downstream can address a
                 // repo outside the caller's team.
-                ClientMsg::Hello { repo, .. } => break id.scope(&repo),
+                ClientMsg::Hello { repo, areas, .. } => break (id.scope(&repo), repo, areas),
                 _ => anyhow::bail!("expected Hello"),
             },
             Some(Ok(_)) => continue,
             _ => return Ok(()),
         }
     };
+
+    // Who this key says we are. A client cannot learn its own member id or
+    // team from anything it holds — the credential is an opaque secret — and
+    // it needs both to seal a shard, because the seal binds them.
+    let me = author.as_ref().map(|email| crate::proto::Me {
+        team_id: id.team_id.clone(),
+        member_id: id.member.id.clone(),
+        email: email.clone(),
+        device_id: id.token_id.clone(),
+        rooms: {
+            let db = app.db.lock().unwrap();
+            crate::rooms::room_grants_for_repo(&db, &id.member.id, &repo_name)
+        },
+    });
+    let mut mem_rx;
 
     // Recover the repo from the durable log *before* taking the map lock.
     // Doing it inside the closure would hold `repos` while locking `db`, and
@@ -885,11 +1638,30 @@ async fn client(sock: WebSocket, app: Arc<App>, id: crate::teams::Identity) -> R
         }
         let st = repos.get_mut(&repo).expect("just inserted");
         st.view.prune();
+        // A client that declares areas is stating what the committed file
+        // says; one that declares none may simply be older than areas, and
+        // must not silently undo a division the rest of the team is working
+        // under.
+        if !declared.is_empty() {
+            st.areas = declared;
+        }
+        let areas = st.areas.clone();
+        mem_rx = st.mem_tx.subscribe();
         (
             ServerMsg::Welcome {
                 seq: st.seq,
-                claims: st.view.claims.clone(),
+                claims: st
+                    .view
+                    .claims
+                    .iter()
+                    .filter(|c| {
+                        id.may_enter(&repo_name, &crate::config::area_of(&areas, &c.path))
+                    })
+                    .cloned()
+                    .collect(),
                 sessions: st.view.sessions.values().cloned().collect(),
+                me: me.clone(),
+                provider: Some(app.provider.clone()),
             },
             st.tx.subscribe(),
         )
@@ -907,9 +1679,69 @@ async fn client(sock: WebSocket, app: Arc<App>, id: crate::teams::Identity) -> R
         }
     });
     let pump_tx = out_tx.clone();
+    // An event about a path this identity may not enter is not delivered.
+    // Areas bound who can collide with whom, and a room that grants `src/auth`
+    // and nothing else should not have its sessions told about — or woken by —
+    // every write in the repo. Pathless events (presence, intent, messages)
+    // reach everyone: a peer you cannot see is worse than a peer working
+    // somewhere you do not care about.
+    let pump_app = app.clone();
+    let pump_repo = repo.clone();
+    let pump_name = repo_name.clone();
+    let pump_id = id.clone();
     let pump = tokio::spawn(async move {
         while let Ok((seq, event)) = rx.recv().await {
+            if !visible_to(&pump_app, &pump_repo, &pump_name, &pump_id, &event) {
+                continue;
+            }
             if pump_tx.send(ServerMsg::Event { seq, event }).is_err() {
+                break;
+            }
+        }
+    });
+
+    // Shards this key's scopes cover, pushed as they are published. Filtered
+    // the same way events are and for the same reason: a room granted one
+    // area must not be handed another area's memory.
+    // A room this key is in moved; tell it so, and let it ask for the log.
+    let mut mls_rx = Some(app.mls_tx.subscribe());
+    let mls_tx_out = out_tx.clone();
+    let mls_rooms: Vec<String> =
+        me.as_ref().map(|m| m.rooms.iter().map(|(r, _)| r.clone()).collect()).unwrap_or_default();
+    let mls_pump = tokio::spawn(async move {
+        let Some(rx) = mls_rx.as_mut() else { return };
+        while let Ok(room) = rx.recv().await {
+            if !mls_rooms.contains(&room) {
+                continue;
+            }
+            if mls_tx_out.send(ServerMsg::MlsWake { room }).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut forget_rx = {
+        let repos = app.repos.lock().unwrap();
+        repos.get(&repo).map(|st| st.forget_tx.subscribe())
+    };
+    let forget_out = out_tx.clone();
+    let forget_pump = tokio::spawn(async move {
+        let Some(rx) = forget_rx.as_mut() else { return };
+        while let Ok(ids) = rx.recv().await {
+            if forget_out.send(ServerMsg::MemForgotten { ids }).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mem_tx_out = out_tx.clone();
+    let mem_scopes = scopes_for(&id, &repo_name);
+    let mem_pump = tokio::spawn(async move {
+        while let Ok(shard) = mem_rx.recv().await {
+            if !mem_scopes.contains(&shard.scope) {
+                continue;
+            }
+            if mem_tx_out.send(ServerMsg::MemShards { shards: vec![shard], more: false }).is_err() {
                 break;
             }
         }
@@ -920,7 +1752,199 @@ async fn client(sock: WebSocket, app: Arc<App>, id: crate::teams::Identity) -> R
         let Ok(cm) = serde_json::from_str::<ClientMsg>(&t) else { continue };
         match cm {
             ClientMsg::Hello { .. } => {}
-            ClientMsg::Append { event } => {
+            ClientMsg::MemPublish { shard } => {
+                if let Err(why) = accept_shard(&app, &repo, &repo_name, &id, &shard) {
+                    let _ = out_tx.send(ServerMsg::MemRejected {
+                        id: shard.id.clone(),
+                        reason: why.to_string(),
+                    });
+                }
+            }
+            ClientMsg::MemForget { ids } => {
+                let scopes = scopes_for(&id, &repo_name);
+                let gone: Vec<String> = {
+                    let db = app.db.lock().unwrap();
+                    ids.into_iter()
+                        .filter(|i| crate::memory::forget(&db, std::slice::from_ref(i), &scopes) > 0)
+                        .collect()
+                };
+                // Everyone else in the area drops it now, not at their next
+                // sync — a sync is keyed on a high-water mark and would never
+                // mention a row that is no longer there.
+                if !gone.is_empty() {
+                    if let Some(st) = app.repos.lock().unwrap().get(&repo) {
+                        let _ = st.forget_tx.send(gone);
+                    }
+                }
+            }
+            ClientMsg::MemRewrap { id: want, epoch, nonce, ciphertext } => {
+                // Any member who holds the scope may rewrap — that is the
+                // point: after a Remove, whoever removed re-seals what the
+                // room can still read. Provenance is untouched, and the seal
+                // is still bound to the original author, so a rewrap cannot
+                // become a way to write as somebody else.
+                let scopes = scopes_for(&id, &repo_name);
+                let done = {
+                    let db = app.db.lock().unwrap();
+                    crate::memory::rewrap(
+                        &db,
+                        &want,
+                        &scopes,
+                        epoch,
+                        &crate::memory::unhex(&nonce),
+                        &crate::memory::unhex(&ciphertext),
+                    )
+                };
+                match done {
+                    // Out to the area, so a device that could not open this
+                    // shard gets the version it can.
+                    Ok(shard) => {
+                        if let Some(st) = app.repos.lock().unwrap().get(&repo) {
+                            let _ = st.mem_tx.send(shard);
+                        }
+                    }
+                    Err(e) => {
+                        let _ = out_tx
+                            .send(ServerMsg::MemRejected { id: want, reason: e.to_string() });
+                    }
+                }
+            }
+            ClientMsg::MemSync { since } => {
+                const PAGE: usize = 500;
+                let scopes = scopes_for(&id, &repo_name);
+                let shards = {
+                    let db = app.db.lock().unwrap();
+                    crate::memory::since(&db, &scopes, since, PAGE)
+                };
+                let more = shards.len() == PAGE;
+                let _ = out_tx.send(ServerMsg::MemShards { shards, more });
+            }
+            // ---- Delivery Service. Every blob below is opaque here: the
+            // relay orders and forwards, and RFC 9750 is explicit that a DS
+            // need not be trusted with content. What it *does* enforce is
+            // membership — a key that is not in a room may not read its
+            // handshake log or write to it.
+            ClientMsg::MlsUpload { key_package } => {
+                if !id.member.unassigned && !id.token_id.is_empty() {
+                    let rooms = {
+                        let db = app.db.lock().unwrap();
+                        let _ = crate::mls::put_key_package(
+                            &db,
+                            &id.team_id,
+                            &id.token_id,
+                            &crate::memory::unhex(&key_package),
+                        );
+                        crate::rooms::room_grants_for_repo(&db, &id.member.id, &repo_name)
+                    };
+                    // A machine that has just become addable is a reason for
+                    // the room's other members to look again. Without this,
+                    // the second laptop to arrive waits for an unrelated
+                    // commit before anyone adds it.
+                    for (room, _) in rooms {
+                        let _ = app.mls_tx.send(room);
+                    }
+                }
+            }
+            ClientMsg::MlsKeyPackage { device } => {
+                let kp = {
+                    let db = app.db.lock().unwrap();
+                    crate::mls::key_package_for(&db, &id.team_id, &device)
+                };
+                let _ = out_tx.send(ServerMsg::MlsKeyPackage {
+                    device,
+                    key_package: kp.as_deref().map(crate::memory::hex),
+                });
+            }
+            ClientMsg::MlsCommit { room, epoch, commit, welcome, for_device } => {
+                let outcome = {
+                    let db = app.db.lock().unwrap();
+                    if !crate::rooms::member_in_room(&db, &room, &id.member.id) {
+                        Err(anyhow::anyhow!("this key is not in that room"))
+                    } else {
+                        crate::mls::append(
+                            &db,
+                            &room,
+                            &crate::mls::Envelope {
+                                seq: 0,
+                                epoch,
+                                kind: "commit".into(),
+                                blob: crate::memory::unhex(&commit),
+                                for_device: None,
+                            },
+                        )
+                        .and_then(|_| {
+                            // The welcome rides the same acceptance as the
+                            // commit that produced it. Storing it separately
+                            // would let a rejected commit leave a welcome
+                            // behind, and a device would join a group the room
+                            // never entered.
+                            if let (Some(w), Some(dev)) = (&welcome, &for_device) {
+                                crate::mls::append(
+                                    &db,
+                                    &room,
+                                    &crate::mls::Envelope {
+                                        seq: 0,
+                                        epoch,
+                                        kind: "welcome".into(),
+                                        blob: crate::memory::unhex(w),
+                                        for_device: Some(dev.clone()),
+                                    },
+                                )?;
+                            }
+                            Ok(())
+                        })
+                    }
+                };
+                match outcome {
+                    Ok(()) => {
+                        let _ = app.mls_tx.send(room.clone());
+                    }
+                    Err(e) => {
+                        let _ = out_tx
+                            .send(ServerMsg::MlsRejected { room, reason: e.to_string() });
+                    }
+                }
+            }
+            ClientMsg::MlsSync { room, since } => {
+                let (msgs, started) = {
+                    let db = app.db.lock().unwrap();
+                    if !crate::rooms::member_in_room(&db, &room, &id.member.id) {
+                        (Vec::new(), false)
+                    } else {
+                        (
+                            crate::mls::log_since(&db, &room, &id.token_id, since),
+                            crate::mls::has_group(&db, &room),
+                        )
+                    }
+                };
+                let _ = out_tx.send(ServerMsg::MlsLog { room, msgs, started });
+            }
+            ClientMsg::MlsRoster { room } => {
+                let devices = {
+                    let db = app.db.lock().unwrap();
+                    if crate::rooms::member_in_room(&db, &room, &id.member.id) {
+                        crate::rooms::devices_in_room(&db, &id.team_id, &room)
+                    } else {
+                        Vec::new()
+                    }
+                };
+                let _ = out_tx.send(ServerMsg::MlsRoster { room, devices });
+            }
+            ClientMsg::MemFetch { id: want } => {
+                // The scope check is inside `get`, which cannot be called
+                // without saying which scopes the caller holds.
+                let scopes = scopes_for(&id, &repo_name);
+                let shards = {
+                    let db = app.db.lock().unwrap();
+                    crate::memory::get(&db, &want, &scopes).into_iter().collect()
+                };
+                let _ = out_tx.send(ServerMsg::MemShards { shards, more: false });
+            }
+            ClientMsg::Append { mut event } => {
+                // Authorship comes from the key, not from what the client says
+                // about itself. Before anything reads the event, so no code
+                // path downstream can see the client's version.
+                event.attribute_to(author.as_deref());
                 // A release frees a path someone may be blocked on.
                 let freed = match &event {
                     Event::ClaimReleased { session, path, .. } => {
@@ -946,17 +1970,30 @@ async fn client(sock: WebSocket, app: Arc<App>, id: crate::teams::Identity) -> R
                 app.commit(&repo, Event::SessionEnded { session: session.clone(), ts: now_ms() });
                 app.announce_freed(&repo, &session, freed);
             }
-            ClientMsg::ClaimReq { id, session, user, path, intent, branch } => {
+            ClientMsg::ClaimReq { id, session, user, path, intent, branch, hub } => {
+                let user = author.clone().unwrap_or(user);
                 // Arbitration: the one decision only the relay may make.
-                let verdict = {
+                let (verdict, is_hub, queued, lease_ms) = {
                     let mut repos = app.repos.lock().unwrap();
                     let st = repos.get_mut(&repo).unwrap();
                     st.view.prune();
+                    // A declared hub is knowledge only the client has — the
+                    // relay never sees the repo — so it is remembered here the
+                    // first time somebody claims one. History-detected hubs
+                    // the relay finds on its own.
+                    if hub {
+                        st.view.declared_hubs.insert(path.clone());
+                    }
+                    let is_hub = st.view.is_hub(&path);
+                    let queued = st.view.queue_len(&path, &session);
+                    let lease_ms = st.view.lease_for(&path);
                     // Resolved under the same lock as the lookup, so the pair
                     // cannot disagree about who holds what.
-                    st.view
+                    let verdict = st
+                        .view
                         .conflicting_on(&session, &path, &branch)
-                        .map(|c| (c.clone(), st.view.holder_intent(c)))
+                        .map(|c| (c.clone(), st.view.holder_intent(c)));
+                    (verdict, is_hub, queued, lease_ms)
                 };
                 match verdict {
                     Some((holder, live_intent)) => {
@@ -984,10 +2021,17 @@ async fn client(sock: WebSocket, app: Arc<App>, id: crate::teams::Identity) -> R
                             // daemon on another machine has nothing else.
                             holder_intent: Some(live_intent),
                             lease_until: Some(holder.lease_until),
+                            hub: is_hub,
+                            queued,
                         });
                     }
                     None => {
-                        let lease_until = now_ms() + LEASE_MS;
+                        // A hub is leased for two minutes rather than ten.
+                        // Locks do not scale and awareness does; a widely
+                        // shared file held for a whole turn is the one case
+                        // where that stops being a slogan and starts being
+                        // every other agent's critical path.
+                        let lease_until = now_ms() + lease_ms;
                         app.commit(
                             &repo,
                             Event::ClaimAcquired {
@@ -1007,6 +2051,8 @@ async fn client(sock: WebSocket, app: Arc<App>, id: crate::teams::Identity) -> R
                             holder_user: None,
                             holder_intent: None,
                             lease_until: Some(lease_until),
+                            hub: is_hub,
+                            queued,
                         });
                     }
                 }
@@ -1015,6 +2061,9 @@ async fn client(sock: WebSocket, app: Arc<App>, id: crate::teams::Identity) -> R
     }
 
     pump.abort();
+    mem_pump.abort();
+    mls_pump.abort();
+    forget_pump.abort();
     writer.abort();
     Ok(())
 }
@@ -1027,6 +2076,7 @@ mod auth_tests {
     fn app_with(token: Option<&str>) -> App {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::teams::init_schema(&conn).unwrap();
+        crate::rooms::init_schema(&conn).unwrap();
         App {
             repos: Mutex::new(HashMap::new()),
             db: Mutex::new(conn),
@@ -1034,6 +2084,8 @@ mod auth_tests {
             token: token.map(str::to_string),
             reg_limit: crate::teams::RateLimit::new(5, 60_000),
             cloud: None,
+            provider: crate::proto::PROVIDER_PLAINTEXT.into(),
+            mls_tx: broadcast::channel(16).0,
         }
     }
 
@@ -1101,7 +2153,7 @@ mod auth_tests {
         let app = app_with(Some("sekrit"));
         let (id, tok) = {
             let db = app.db.lock().unwrap();
-            crate::teams::create_team(&db, "Acme").unwrap()
+            crate::teams::create_team(&db, "Acme", Some("acme@example.com")).unwrap()
         };
         let got = identify(&app, &bearer(&format!("Bearer {}", tok.secret)), None).await.unwrap();
         assert_eq!(got.team_id, id.team_id);
@@ -1115,11 +2167,11 @@ mod auth_tests {
         let app = app_with(None);
         let (a, ta) = {
             let db = app.db.lock().unwrap();
-            crate::teams::create_team(&db, "A").unwrap()
+            crate::teams::create_team(&db, "A", Some("a@example.com")).unwrap()
         };
         let (b, tb) = {
             let db = app.db.lock().unwrap();
-            crate::teams::create_team(&db, "B").unwrap()
+            crate::teams::create_team(&db, "B", Some("b@example.com")).unwrap()
         };
         let ia = identify(&app, &bearer(&format!("Bearer {}", ta.secret)), None).await.unwrap();
         let ib = identify(&app, &bearer(&format!("Bearer {}", tb.secret)), None).await.unwrap();
@@ -1136,7 +2188,7 @@ mod auth_tests {
         let app = app_with(Some("sekrit"));
         let (_, tok) = {
             let db = app.db.lock().unwrap();
-            crate::teams::create_team(&db, "Stranger").unwrap()
+            crate::teams::create_team(&db, "Stranger", Some("stranger@example.com")).unwrap()
         };
         let id = identify(&app, &bearer(&format!("Bearer {}", tok.secret)), None).await.unwrap();
         assert!(
@@ -1150,12 +2202,12 @@ mod auth_tests {
         let app = app_with(None);
         let (id, first) = {
             let db = app.db.lock().unwrap();
-            crate::teams::create_team(&db, "Acme").unwrap()
+            crate::teams::create_team(&db, "Acme", Some("acme@example.com")).unwrap()
         };
         {
             let db = app.db.lock().unwrap();
-            crate::teams::mint_token(&db, &id.team_id, "second").unwrap();
-            crate::teams::revoke(&db, &id.team_id, &first.id).unwrap();
+            crate::rooms::mint_device(&db, &id.team_id, &id.member.id, "second").unwrap();
+            crate::rooms::revoke_device(&db, &id.team_id, &first.id).unwrap();
         }
         // Not a downgrade to the anonymous identity — a refusal. Anything
         // else would let a revoked token keep opening a console, and hand it
@@ -1164,5 +2216,195 @@ mod auth_tests {
             identify(&app, &bearer(&format!("Bearer {}", first.secret)), None).await.is_none(),
             "a revoked token must be refused outright, not treated as anonymous"
         );
+    }
+
+    /// A key resolves to the person it was minted for, and to the areas their
+    /// rooms grant. Everything in phase 1 rests on this one resolution.
+    #[tokio::test]
+    async fn a_presented_key_resolves_to_a_verified_member_and_their_areas() {
+        let app = app_with(None);
+        let (_, tok) = {
+            let db = app.db.lock().unwrap();
+            crate::teams::create_team(&db, "Acme", Some("ash@example.com")).unwrap()
+        };
+        let id = identify(&app, &bearer(&format!("Bearer {}", tok.secret)), None).await.unwrap();
+        assert_eq!(id.member.email, "ash@example.com");
+        assert!(!id.member.unassigned);
+        assert!(id.may_enter("api", "/"), "the general room covers the whole repo");
+    }
+
+    /// The fail-open, works-unconfigured property in REPORT.md is load-bearing
+    /// and members must not have touched it: a loopback relay with no setup
+    /// still hands out an identity, and that identity can still work.
+    #[tokio::test]
+    async fn an_unconfigured_relay_still_answers_with_a_usable_identity() {
+        let app = app_with(None);
+        let id = identify(&app, &axum::http::HeaderMap::new(), None).await.unwrap();
+        assert_eq!(id.team_id, "local");
+        assert_eq!(id.member.email, "local");
+        assert!(id.may_enter("anything", "/"), "an unconfigured relay gates nothing");
+    }
+
+    /// A key with no verified person behind it — the legacy secret, the
+    /// unconfigured relay, a migrated key nobody has adopted — must keep the
+    /// client's own authorship string. Inventing an author would be worse
+    /// than an honest self-reported one.
+    #[tokio::test]
+    async fn a_legacy_identity_does_not_get_a_fabricated_author() {
+        let app = app_with(Some("sekrit"));
+        let id = identify(&app, &bearer("Bearer sekrit"), None).await.unwrap();
+        assert_eq!(id.team_id, "root");
+        let author: Option<String> =
+            (!id.member.unassigned && id.member.email.contains('@')).then(|| id.member.email.clone());
+        assert!(author.is_none(), "nothing here proves who is at the keyboard");
+
+        let mut ev = Event::FileWritten {
+            session: "s1".into(),
+            user: "ash".into(),
+            path: "a.rs".into(),
+            ts: 1,
+        };
+        ev.attribute_to(author.as_deref());
+        let Event::FileWritten { user, .. } = ev else { unreachable!() };
+        assert_eq!(user, "ash", "the client's string stands when nothing better is known");
+    }
+
+    /// And the converse, which is the reason devices exist: with a verified
+    /// member, whatever the client claims about itself is overwritten.
+    #[tokio::test]
+    async fn authorship_on_events_comes_from_the_key_not_the_client() {
+        let app = app_with(None);
+        let (_, tok) = {
+            let db = app.db.lock().unwrap();
+            crate::teams::create_team(&db, "Acme", Some("ash@example.com")).unwrap()
+        };
+        let id = identify(&app, &bearer(&format!("Bearer {}", tok.secret)), None).await.unwrap();
+        let author = Some(id.member.email.clone());
+
+        // KNOOT_USER is a display convenience, and on its own it was also a
+        // way to write an event as somebody else.
+        let mut ev = Event::FileWritten {
+            session: "s1".into(),
+            user: "priya".into(),
+            path: "a.rs".into(),
+            ts: 1,
+        };
+        ev.attribute_to(author.as_deref());
+        let Event::FileWritten { user, .. } = ev else { unreachable!() };
+        assert_eq!(user, "ash@example.com");
+    }
+
+    // ------------------------------------------------------ knoot why
+
+    fn log_db() -> rusqlite::Connection {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE events (repo TEXT, seq INTEGER, ts INTEGER, json TEXT);",
+        )
+        .unwrap();
+        c
+    }
+
+    fn log(c: &rusqlite::Connection, seq: i64, ts: u64, ev: serde_json::Value) {
+        c.execute(
+            "INSERT INTO events (repo, seq, ts, json) VALUES ('t/r', ?1, ?2, ?3)",
+            rusqlite::params![seq, ts as i64, ev.to_string()],
+        )
+        .unwrap();
+    }
+
+    /// The flight recorder. The log has held this since the first version and
+    /// nothing read it back.
+    #[test]
+    fn one_files_story_is_its_own_events_plus_what_its_people_said() {
+        let c = log_db();
+        log(&c, 1, 100, serde_json::json!({
+            "type": "intent_declared", "session": "s1", "text": "normalise errors", "ts": 100
+        }));
+        log(&c, 2, 200, serde_json::json!({
+            "type": "claim_acquired", "session": "s1", "user": "sam",
+            "path": "src/response.js", "intent": "normalise errors", "ts": 200
+        }));
+        log(&c, 3, 300, serde_json::json!({
+            "type": "claim_denied", "session": "s2", "user": "priya",
+            "path": "src/response.js", "holder_user": "sam", "ts": 300
+        }));
+        log(&c, 4, 400, serde_json::json!({
+            "type": "message", "from_session": "", "from_user": "sam",
+            "to": serde_json::Value::Null, "text": "taking it", "ts": 400
+        }));
+        // Another file entirely, and an intent from a session that never
+        // touched ours.
+        log(&c, 5, 500, serde_json::json!({
+            "type": "claim_acquired", "session": "s9", "user": "kim",
+            "path": "src/other.js", "intent": "unrelated", "ts": 500
+        }));
+        log(&c, 6, 600, serde_json::json!({
+            "type": "intent_declared", "session": "s9", "text": "unrelated work", "ts": 600
+        }));
+
+        let story = events_for_path(&c, "t/r", "src/response.js", 100);
+        let kinds: Vec<&str> = story.iter().map(|e| e["type"].as_str().unwrap()).collect();
+        assert_eq!(
+            kinds,
+            vec!["intent_declared", "claim_acquired", "claim_denied", "message"],
+            "in the order things happened, and nothing from the unrelated session"
+        );
+        assert!(
+            !story.iter().any(|e| e["text"].as_str() == Some("unrelated work")),
+            "a session that never touched the file has nothing to say about it"
+        );
+        // A message with no session id still lands: `knoot msg` cannot know
+        // its own session, and dropping those loses what a person announced.
+        assert_eq!(story[3]["text"], "taking it");
+    }
+
+    /// A path is matched as a whole value, not as a substring — or asking
+    /// about `src/a.rs` would return `src/a.rs.bak`'s history as well.
+    #[test]
+    fn a_path_does_not_match_its_own_prefix() {
+        let c = log_db();
+        for (seq, path) in [(1, "src/a.rs"), (2, "src/a.rs.bak"), (3, "vendor/src/a.rs")] {
+            log(&c, seq, seq as u64 * 100, serde_json::json!({
+                "type": "file_written", "session": "s1", "user": "sam",
+                "path": path, "ts": seq * 100
+            }));
+        }
+        let story = events_for_path(&c, "t/r", "src/a.rs", 100);
+        assert_eq!(story.len(), 1, "one file, not three: {story:?}");
+        assert_eq!(story[0]["path"], "src/a.rs");
+
+        // And a leading slash is the same question.
+        assert_eq!(events_for_path(&c, "t/r", "/src/a.rs", 100).len(), 1);
+    }
+
+    /// One team's question may not read another team's log — the repo key is
+    /// namespaced by team and this path must respect it like every other.
+    #[test]
+    fn one_teams_file_story_cannot_reach_another_teams_log() {
+        let c = log_db();
+        c.execute(
+            "INSERT INTO events (repo, seq, ts, json) VALUES ('other/r', 1, 100, ?1)",
+            rusqlite::params![serde_json::json!({
+                "type": "file_written", "session": "s1", "user": "kim",
+                "path": "src/response.js", "ts": 100
+            })
+            .to_string()],
+        )
+        .unwrap();
+        assert!(events_for_path(&c, "t/r", "src/response.js", 100).is_empty());
+        assert_eq!(events_for_path(&c, "other/r", "src/response.js", 100).len(), 1);
+    }
+
+    /// A file nobody has touched is an empty story, not an error and not the
+    /// whole log.
+    #[test]
+    fn a_file_with_no_history_has_an_empty_story() {
+        let c = log_db();
+        log(&c, 1, 100, serde_json::json!({
+            "type": "session_started", "session": "s1", "user": "sam",
+            "branch": "main", "ts": 100
+        }));
+        assert!(events_for_path(&c, "t/r", "src/never-touched.js", 100).is_empty());
     }
 }
