@@ -109,6 +109,8 @@ table.rows td { padding: 11px 16px; border-bottom: 1px solid #222830; vertical-a
 table.rows tr:last-child td { border-bottom: 0; }
 table.rows td.mono { font-family: var(--mono); font-size: 13px; }
 table.rows td.dim { color: var(--panel-dim); }
+/* Also outside a table: a room with no areas, an empty member list. */
+.dim { color: var(--panel-dim); }
 table.rows td.right { text-align: right; }
 table.rows td.holds { font-family: var(--mono); font-size: 12.5px; color: var(--held); }
 table.rows td.holds.none { color: var(--panel-dim); font-family: var(--sans); font-size: 14px; }
@@ -157,6 +159,22 @@ table.rows td.holds.blocked { color: var(--blocked); font-family: var(--sans); f
   font: 14px var(--sans);
 }
 .inline-form input:focus { outline: none; border-color: var(--wire); }
+/* Rooms pick a repo and a member from what already exists, so the form needs
+   a control that reads as part of the same row as its inputs. */
+.inline-form select {
+  padding: 9px 10px; border-radius: 3px;
+  border: 1px solid var(--panel-rule); background: #12161a; color: var(--panel-text);
+  font: 14px var(--sans);
+}
+.inline-form select:focus { outline: none; border-color: var(--wire); }
+
+/* A field label inside a panel body, where `.reveal` is not what is being
+   labelled: the areas and members of a room. */
+.panel-body > .lbl {
+  font-size: 12px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--panel-dim); margin-bottom: 6px;
+}
+.panel-body p.mono { font-family: var(--mono); font-size: 13px; line-height: 1.9; }
 .steps { counter-reset: s; }
 .steps .step { padding: 14px 0; border-top: 1px solid #222830; }
 .steps .step:first-child { border-top: 0; padding-top: 0; }

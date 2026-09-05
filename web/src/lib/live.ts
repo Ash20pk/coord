@@ -119,6 +119,13 @@ export const EVENT_CLASS: Record<string, string> = {
   message: 'wire',
   ungated_write: 'warn',
   cross_branch_overlap: 'warn',
+  // The collisions a claim cannot see. `create_collision` is red because two
+  // agents creating one file is work already lost; the rest are warnings
+  // because somebody was told in time.
+  create_collision: 'blocked',
+  duplicate_intent: 'blocked',
+  stale_read: 'warn',
+  path_removed: 'warn',
 };
 
 export function eventDetail(e: RelayEvent): string {
@@ -129,6 +136,14 @@ export function eventDetail(e: RelayEvent): string {
     case 'message': return `to ${e.to ?? 'all'}: ${e.text ?? ''}`;
     case 'session_started': return `joined on ${e.branch ?? 'unknown branch'}`;
     case 'session_ended': return 'left';
+    case 'stale_read':
+      return `${e.path}, read before ${e.peer_user ?? 'a peer'} changed it`;
+    case 'create_collision':
+      return `${e.path}, already created by ${e.peer_user ?? 'a peer'}`;
+    case 'duplicate_intent':
+      return `same task as ${e.peer_user ?? 'a peer'}: “${e.peer_text ?? ''}”`;
+    case 'path_removed':
+      return `${e.path} ${e.moved ? 'moved away' : 'deleted'}`;
     default: return e.path ?? '';
   }
 }

@@ -14,7 +14,34 @@ h3 { font-size: 18px; line-height: 1.3; }
 .lede { font-size: 17.5px; line-height: 1.55; color: var(--ink); }
 .hero-actions { display: flex; gap: 10px; margin-top: 22px; flex-wrap: wrap; }
 .hero-note { margin-top: 12px; font-size: 14px; color: var(--ink-2); }
-.hero-term { grid-column: 1 / -1; margin-top: 48px; display: grid; grid-template-columns: 1fr 1.35fr; gap: 20px; }
+/* ---------- hero workspace: several agent sessions at once ---------- */
+.workspace { grid-column: 1 / -1; margin: 52px 0 0; }
+.workspace figcaption {
+  display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  padding-bottom: 10px; border-bottom: 1px solid var(--ink);
+  font-size: 13.5px;
+}
+.workspace .ws-title { font-weight: 500; }
+.workspace .ws-note { margin-left: auto; color: var(--ink-2); font-family: var(--mono); font-size: 12.5px; }
+.ws-panes { margin-top: 14px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.pane { display: flex; flex-direction: column; }
+.pane pre { flex: 1; font-size: 12.2px; line-height: 1.62; white-space: pre-wrap; overflow-x: hidden; }
+.pane .bar .cmd { font-weight: 500; }
+.pane .bar .state {
+  margin-left: auto; font-family: var(--mono); font-size: 11.5px;
+  padding: 2px 7px; border-radius: 999px; border: 1px solid currentColor;
+}
+.state.held { color: var(--held); }
+.state.blocked { color: var(--blocked); }
+.state.wire { color: var(--wire); }
+.cur {
+  display: inline-block; width: .62em; height: 1.05em; vertical-align: -.18em;
+  background: var(--panel-dim); animation: ws-blink 1.1s steps(1) infinite;
+}
+@keyframes ws-blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .cur { animation: none; } }
+.ws-log { margin-top: 14px; }
+.ws-log pre { font-size: 12.6px; }
 
 /* ---------- problem ---------- */
 .problem { padding: 96px 0; }
@@ -81,7 +108,7 @@ h3 { font-size: 18px; line-height: 1.3; }
   .hero h1, .hero-side, .p-copy, .p-facts, .bs-copy, .bs-term,
   .how-copy, .how-fig, .pr-head, .pr-list { grid-column: 1 / -1; }
   .hero-side, .p-facts, .bs-term, .how-fig, .pr-list { margin-top: 32px; }
-  .hero-term { grid-template-columns: 1fr; }
+  .ws-panes { grid-template-columns: 1fr; }
   .agent-grid, .how-parts { grid-template-columns: 1fr 1fr; row-gap: 28px; }
   .pr-list > div { grid-template-columns: 1fr; gap: 8px; }
 }

@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>knoot — coordination for coding agents</title>
-<meta name="description" content="A sequenced event log with claims, leases and conflict briefs, so several coding agents can work one repository without overwriting each other. Works with any agent that supports hooks.">
+<title>knoot — multiplayer coding for agents</title>
+<meta name="description" content="knoot makes one repository safe for many coding agents at once. Agents claim the files they touch, see who holds the rest, and talk to each other instead of overwriting work. Works with any agent that can run a command before it writes.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wdth,wght@0,75..100,400..700;1,75..100,400..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -32,68 +32,114 @@
 
 <section class="hero">
   <div class="wrap grid">
-    <h1>Run ten coding agents on one repository without losing work.</h1>
+    <h1>Coding agents are single&#8209;player. Make the repo multiplayer.</h1>
     <div class="hero-side">
       <p class="lede">
-        knoot is a coordination layer for AI coding agents. Agents claim the files
-        they are about to edit, hold them on a short lease, and hand any agent that
-        wants a busy file the name of the holder and what they are doing. It works
-        with any agent that can run a command before it writes.
+        Run a whole team of agents in one repository and none of them overwrite
+        another. Each one claims the files it is about to touch, sees who holds the
+        rest and why, and can ask the holder directly. One shared log, every session
+        in it — agents and people alike.
       </p>
       <div class="hero-actions">
         <a class="btn" href="/app/#signup">Start free</a>
         <a class="btn quiet" href="/docs/">Read the docs</a>
       </div>
-      <p class="hero-note">Self-host the whole thing from one binary, or use the hosted relay.</p>
+      <p class="hero-note">Works with any agent that can run a command before it writes. Self-host from one binary, or use the hosted relay.</p>
     </div>
 
-    <div class="hero-term">
-      <div class="term">
-        <div class="bar">
-          <span class="cmd">knoot status</span>
-          <span class="real">unedited output from the binary</span>
-        </div>
-<pre><span class="g">[ok  ]</span> binary    /usr/local/bin/knoot
-<span class="g">[ok  ]</span> repo      ~/project <span class="d">(id: repo-fade58f512a66c42)</span>
-<span class="g">[ok  ]</span> hooks     6 events, resolved from PATH
-<span class="g">[ok  ]</span> daemon    responding
-<span class="g">[ok  ]</span> relay     wss://knoot.dev/ws <span class="d">(token: present)</span>
+    <figure class="workspace">
+      <figcaption>
+        <span class="ws-title">One repository, three sessions, the same moment</span>
+        <span class="ws-note">unedited terminal output</span>
+      </figcaption>
 
-coordination is on.</pre>
+      <div class="ws-panes">
+        <div class="term pane">
+          <div class="bar">
+            <span class="cmd">ash</span>
+            <span class="state held">holds 2 files</span>
+          </div>
+<pre>&gt; refactor session handling to use
+  short-lived tokens
+
+<span class="d">● Edit(src/auth.js)</span>
+<span class="g">knoot: claimed src/auth.js (lease 10m)</span>
+<span class="d">  └ 34 additions, 11 removals</span>
+
+<span class="d">● Edit(src/session.js)</span>
+<span class="g">knoot: claimed src/session.js (lease 10m)</span>
+<span class="cur"> </span></pre>
+        </div>
+
+        <div class="term pane">
+          <div class="bar">
+            <span class="cmd">priya</span>
+            <span class="state blocked">blocked</span>
+          </div>
+<pre>&gt; add refreshSession() to the auth
+  module
+
+<span class="d">● Edit(src/auth.js)</span>
+<span class="o">knoot: held by ash</span> <span class="d">— "refactor session
+  handling to use short-lived tokens".
+  ~8m left. Work elsewhere, or wait.</span>
+
+<span class="d">I will start on the token helper
+instead and come back to auth.js.</span>
+<span class="d">● Edit(</span><span class="g">src/tokens.js</span><span class="d">)</span><span class="cur"> </span></pre>
+        </div>
+
+        <div class="term pane">
+          <div class="bar">
+            <span class="cmd">sam</span>
+            <span class="state wire">asking</span>
+          </div>
+<pre>&gt; move the login route onto the new
+  session API
+
+<span class="w">knoot msg ash "are you changing the
+  signature of createSession?"</span>
+
+<span class="w">knoot: ash → sam</span> <span class="d">"yes, it takes an
+  options object now. Land after me."</span>
+
+<span class="d">Waiting on src/auth.js.</span>
+<span class="cur"> </span></pre>
+        </div>
       </div>
-      <div class="term">
+
+      <div class="term ws-log">
         <div class="bar">
           <span class="cmd">knoot who</span>
-          <span class="real">three agents, one repository</span>
+          <span class="real">one sequenced log per repository</span>
         </div>
-<pre>priya        main   <span class="d">"Add refreshSession() to the auth module"</span>      51s ago
-             └─ <span class="g">src/tokens.js (lease 9m)</span>
-sam          main   <span class="d">-</span>                                             51s ago
-ash          main   <span class="d">"Refactor session handling to use short-lived tokens"</span> 64s ago
-             └─ <span class="g">src/auth.js (lease 8m)</span>
-
-recently written:
-priya        src/tokens.js                                     51s ago
-ash          src/auth.js                                       64s ago</pre>
+<pre>ash          main   <span class="d">"Refactor session handling to use short-lived tokens"</span>   4s ago
+             ├─ <span class="g">src/auth.js (lease 8m)</span>
+             └─ <span class="g">src/session.js (lease 9m)</span>
+priya        main   <span class="d">"Add refreshSession() to the auth module"</span>               2s ago
+             └─ <span class="g">src/tokens.js (lease 10m)</span>
+sam          main   <span class="d">"Move the login route onto the new session API"</span>          1s ago
+             └─ <span class="o">denied src/auth.js</span> <span class="d">— waiting for release</span></pre>
       </div>
-    </div>
+    </figure>
   </div>
 </section>
 
 <section class="problem" id="problem">
   <div class="wrap grid">
     <div class="p-copy">
-      <h2>Parallel agents are fast until two of them open the same file</h2>
+      <h2>A second agent is not a second developer</h2>
       <p>
-        One agent per repository is a solved problem. Four are not. They cannot see
-        each other, so two will pick the same file, and the second write silently
-        replaces the first. Nothing errors. The model that lost its work reports
-        success, because from inside the session nothing failed.
+        Two developers in one repository talk. Two agents cannot: each is alone in
+        its own session, with no idea the other exists. So both reach for the same
+        file, and the second write silently replaces the first. Nothing errors. The
+        agent whose work was erased reports success, because from inside that session
+        nothing failed.
       </p>
       <p>
-        Worktrees and branches move the collision to merge time rather than removing
-        it. knoot removes it at the moment of the write, which is the only moment an
-        agent can still change its mind.
+        Worktrees and branches only postpone the collision until merge time, and by
+        then both agents have stopped. knoot resolves it at the moment of the write —
+        the one moment an agent can still change its mind and do something else.
       </p>
     </div>
     <dl class="p-facts">
@@ -152,12 +198,12 @@ by shell does not bypass the claim.</pre>
 <section class="agents" id="agents">
   <div class="wrap">
     <div class="sec-head">
-      <h2>Agent agnostic on purpose</h2>
+      <h2>Every player, whatever it runs on</h2>
       <p class="muted">
         knoot never talks to a model. It reads a small JSON payload on stdin and
-        answers allow or deny on stdout, so anything that can run a command before
-        it edits a file can be coordinated: a vendor's CLI, your own agent loop, a
-        CI job, or a person with a shell alias.
+        answers allow or deny on stdout, so anything that can run a command before it
+        edits a file joins the same session table: a vendor's CLI, your own agent
+        loop, a CI job, or a person with a shell alias.
       </p>
     </div>
     <div class="agent-grid">
@@ -283,7 +329,7 @@ by shell does not bypass the claim.</pre>
 
 <section class="close">
   <div class="wrap">
-    <h2>Put every agent in the same log.</h2>
+    <h2>Give your agents a way to work together.</h2>
     <div class="close-actions">
       <a class="btn" href="/app/#signup">Start free</a>
       <a class="btn quiet" href="/docs/">Read the docs</a>

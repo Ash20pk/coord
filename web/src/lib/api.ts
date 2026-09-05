@@ -43,15 +43,67 @@ export type RelayEvent = {
   holder_user?: string;
   intent?: string;
   lease_until?: number;
+  /// Phase 2 awareness events: who else was involved, and when.
+  peer_user?: string;
+  peer_text?: string;
+  read_ts?: number;
+  write_ts?: number;
+  moved?: boolean;
 };
 
 export type ClaimRow = { session: string; user?: string; path: string; lease_until?: number; intent?: string };
 export type SessionRow = { session: string; user?: string; branch?: string; intent?: string };
 
+/** One `(repo, area)` a key may enter. `*` is every repo, `/` the whole repo. */
+export type Area = { repo: string; area: string };
+
+export type RelayMember = {
+  id: string;
+  email: string;
+  role: string;
+  /** A key brought forward from before members existed, with no owner yet. */
+  unassigned: boolean;
+};
+
+export type RoomPayload = {
+  id: string;
+  name: string;
+  policy: Record<string, unknown>;
+  areas: Area[];
+  members: RelayMember[];
+};
+
+/**
+ * Who the relay says the caller is. Verified from the credential, not from
+ * anything the browser claims about itself — the console shows it so a person
+ * can tell which member their session speaks for.
+ */
+export type Me = {
+  member_id: string;
+  email: string;
+  role: string;
+  unassigned: boolean;
+  device_id: string;
+  areas: Area[];
+};
+
 export type TeamPayload = {
   team_id: string;
   team: string;
-  tokens: Array<{ id: string; label: string; created_ts: number; last_seen_ts: number | null; revoked: boolean }>;
+  me: Me;
+  /** Device keys: one row per machine per person. */
+  tokens: Array<{
+    id: string;
+    label: string;
+    member_id: string;
+    member_email: string;
+    unassigned: boolean;
+    created_ts: number;
+    last_seen_ts: number | null;
+    revoked: boolean;
+  }>;
+  members: RelayMember[];
+  rooms: RoomPayload[];
   repos: Array<{ repo: string; last_seen_ts?: number | null }>;
   token_id?: string;
 };

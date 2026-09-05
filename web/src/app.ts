@@ -1,7 +1,10 @@
 import { RELAY_WS, esc, wireCopyButtons } from './lib/relay';
-import { api, type TeamPayload, type RelayEvent } from './lib/api';
+import { api, type TeamPayload, type RelayEvent, type RelayMember, type Area } from './lib/api';
 import { LiveRepo, EVENT_CLASS, eventDetail, ago } from './lib/live';
-import { configured, supabase, loadTeam, createTeam, type Team } from './lib/supabase';
+import {
+  configured, supabase, loadTeam, createTeam, inviteMember, listInvites, revokeInvite,
+  acceptInvite, removeTeamMember, type Team, type Invite,
+} from './lib/supabase';
 
 const $ = <T extends Element = HTMLElement>(sel: string, root: ParentNode = document): T | null =>
   root.querySelector<T>(sel);
@@ -147,7 +150,7 @@ $('#signout')!.addEventListener('click', async () => {
 /* ------------------------------------------------------------------ *
  * Views
  * ------------------------------------------------------------------ */
-const ROUTES = ['sessions', 'repositories', 'tokens', 'team', 'settings'] as const;
+const ROUTES = ['sessions', 'repositories', 'tokens', 'rooms', 'team', 'settings'] as const;
 type Route = (typeof ROUTES)[number];
 
 function route(): Route {
@@ -170,6 +173,7 @@ function render(): void {
     case 'sessions': return viewSessions();
     case 'repositories': return viewRepositories();
     case 'tokens': return viewTokens();
+    case 'rooms': return viewRooms();
     case 'team': return viewTeam();
     case 'settings': return viewSettings();
   }
@@ -327,12 +331,16 @@ function viewRepositories(): void {
 function viewTokens(): void {
   const tokens = relayTeam?.tokens ?? [];
   const liveCount = tokens.filter((t) => !t.revoked).length;
+  const members = relayTeam?.members ?? [];
+  const orphans = members.filter((m) => m.unassigned);
+  const me = relayTeam?.me;
+  const canAdmin = me?.role === 'owner' || me?.role === 'admin';
   viewEl.innerHTML = `
     <div class="page">
       <div class="page-head">
         <div>
-          <h1>Agent tokens</h1>
-          <p>Machines authenticate with tokens, not with your password. Give each machine its own so revoking one costs you nothing else. Tokens are stored as hashes and can never be shown again.</p>
+          <h1>Agent keys</h1>
+          <p>A key belongs to one machine and names one person. That is what lets the relay say who wrote something without taking the agent&rsquo;s word for it &mdash; and what lets one laptop be revoked without touching anybody else. Keys are stored as hashes and can never be shown again.</p>
         </div>
       </div>
 
@@ -341,22 +349,40 @@ function viewTokens(): void {
         <div class="panel-body">
           <div class="inline-form">
             <input id="mint-label" maxlength="40" placeholder="Label, such as laptop or ci">
-            <button class="btn" id="mint-go">Mint token</button>
+            ${canAdmin && members.length > 1 ? `<select id="mint-member">
+              ${members.filter((m) => !m.unassigned).map((m) => `<option value="${esc(m.id)}"${
+                m.id === me?.member_id ? ' selected' : ''}>${esc(m.email)}</option>`).join('')}
+            </select>` : ''}
+            <button class="btn" id="mint-go">Mint key</button>
           </div>
           <div id="mint-out"></div>
           <div class="err" id="tok-err" hidden></div>
         </div>
         ${tokens.length ? `<table class="rows">
-          <thead><tr><th>Label</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+          <thead><tr><th>Label</th><th>Belongs to</th><th>Created</th><th>Last used</th><th></th></tr></thead>
           <tbody>${tokens.map((t) => `<tr>
             <td><span class="${t.revoked ? 'strike' : ''}">${esc(t.label || 'unlabelled')}</span>${
-              t.id === relayTeam?.token_id ? '<span class="tag mine">this console</span>' : ''}${
               t.revoked ? '<span class="tag dead">revoked</span>' : ''}</td>
+            <td class="${t.unassigned ? 'dim' : ''}">${t.unassigned
+              ? '<span class="tag">unassigned</span>'
+              : esc(t.member_email)}</td>
             <td class="dim">${esc(ago(t.created_ts))}</td>
             <td class="dim">${t.revoked ? '' : esc(ago(t.last_seen_ts))}</td>
             <td class="right">${t.revoked ? '' : `<button class="btn danger sm" data-revoke="${esc(t.id)}">Revoke</button>`}</td>
           </tr>`).join('')}</tbody></table>` : ''}
       </div>
+
+      ${orphans.length ? `<div class="panel">
+        <div class="panel-head"><h2>Keys with no owner</h2></div>
+        <div class="panel-body">
+          <p>These were minted before keys named a person, so they still work but nothing they write can be attributed. Attaching one to yourself does not change the key &mdash; the machine using it carries on &mdash; it only records whose it is.</p>
+          <table class="rows" style="margin-top:14px">
+            <tbody>${orphans.map((m) => `<tr>
+              <td class="mono dim">${esc(m.email.replace('@unassigned.invalid', ''))}</td>
+              <td class="right"><button class="btn quiet sm" data-attach="${esc(m.id)}">This is mine</button></td>
+            </tr>`).join('')}</tbody></table>
+        </div>
+      </div>` : ''}
 
       <div class="panel">
         <div class="panel-head"><h2>Use a token</h2></div>
@@ -365,8 +391,8 @@ function viewTokens(): void {
             <div class="cmd-row"><code>cargo install --git https://github.com/Ash20pk/knoot</code><button class="copy" type="button">Copy</button></div></div>
           <div class="step"><p>Enrol the repository once, then commit what it writes.</p>
             <div class="cmd-row"><code>knoot init --relay ${esc(RELAY_WS)}</code><button class="copy" type="button">Copy</button></div></div>
-          <div class="step"><p>Store the token on that machine and run the daemon.</p>
-            <div class="cmd-row"><code>knoot login --relay ${esc(RELAY_WS)} --token &lt;token&gt;</code><button class="copy" type="button">Copy</button></div>
+          <div class="step"><p>Store the key on that machine and run the daemon. <code>join</code> asks the relay who the key is for and prints the rooms and areas it opens, so a wrong key fails here rather than quietly an hour later.</p>
+            <div class="cmd-row"><code>knoot join &lt;key&gt; --relay ${esc(RELAY_WS)}</code><button class="copy" type="button">Copy</button></div>
             <div class="cmd-row"><code>knoot daemon</code><button class="copy" type="button">Copy</button></div></div>
         </div>
       </div>
@@ -381,10 +407,16 @@ function viewTokens(): void {
     btn.disabled = true;
     try {
       const label = ($('#mint-label') as HTMLInputElement).value.trim();
-      const j = await api<{ token: string }>('/api/tokens', { method: 'POST', body: JSON.stringify({ label }) });
+      const member = ($('#mint-member') as HTMLSelectElement | null)?.value;
+      const j = await api<{ token: string }>('/api/tokens', {
+        method: 'POST',
+        body: JSON.stringify(member ? { label, member } : { label }),
+      });
       $('#mint-out')!.innerHTML = `<div class="reveal">
-        <div class="lbl">New token. This is the only time it is readable.</div>
-        <div class="val">${esc(j.token)}</div></div>`;
+        <div class="lbl">New key. This is the only time it is readable.</div>
+        <div class="val">${esc(j.token)}</div></div>
+        <div class="cmd-row"><code>knoot join ${esc(j.token)} --relay ${esc(RELAY_WS)}</code><button class="copy" type="button">Copy</button></div>`;
+      wireCopyButtons($('#mint-out')!);
       await refreshRelayTeam();
     } catch (e) {
       err.textContent = (e as Error).message;
@@ -394,9 +426,28 @@ function viewTokens(): void {
     }
   });
 
+  for (const b of viewEl.querySelectorAll<HTMLButtonElement>('[data-attach]')) {
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        await api('/api/members/attach', {
+          method: 'POST',
+          body: JSON.stringify({ from: b.dataset.attach }),
+        });
+        await refreshRelayTeam();
+        viewTokens();
+      } catch (e) {
+        const err = $('#tok-err') as HTMLElement;
+        err.textContent = (e as Error).message;
+        err.hidden = false;
+        b.disabled = false;
+      }
+    });
+  }
+
   for (const b of viewEl.querySelectorAll<HTMLButtonElement>('[data-revoke]')) {
     b.addEventListener('click', async () => {
-      if (!confirm('Revoke this token? Machines using it stop coordinating. They fail open, so their agents keep working alone.')) return;
+      if (!confirm('Revoke this key? The machine using it stops coordinating. It fails open, so its agents keep working alone.')) return;
       b.disabled = true;
       try {
         await api(`/api/tokens/${encodeURIComponent(b.dataset.revoke!)}/revoke`, { method: 'POST' });
@@ -412,43 +463,371 @@ function viewTokens(): void {
   }
 }
 
+/* ---- rooms: access groups over areas ---- */
+/**
+ * A room is a set of people and the `(repo, area)` pairs they work in. Until
+ * areas are declared in `.knoot.toml`, every area is `/` — the whole repo —
+ * so for most teams this page shows one room called `general` and there is
+ * nothing to do here. It earns its keep when a repo is big enough that not
+ * everyone should be told about everyone else's edits.
+ */
+function viewRooms(): void {
+  const rooms = relayTeam?.rooms ?? [];
+  const members = relayTeam?.members ?? [];
+  const repos = relayTeam?.repos ?? [];
+  const me = relayTeam?.me;
+  const canAdmin = me?.role === 'owner' || me?.role === 'admin';
+
+  const areaLabel = (a: Area): string =>
+    a.repo === '*' && a.area === '/' ? 'every repository' : `${a.repo}:${a.area}`;
+
+  viewEl.innerHTML = `
+    <div class="page">
+      <div class="page-head">
+        <div>
+          <h1>Rooms</h1>
+          <p>A room decides who can collide with whom. Everyone in a room sees the live claims, the writes and &mdash; when it arrives &mdash; the shared memory of the areas that room holds. Every team starts with one room over everything, which is the right answer until a repository is big enough to be worth splitting.</p>
+        </div>
+      </div>
+
+      ${canAdmin ? `<div class="panel">
+        <div class="panel-head"><h2>New room</h2></div>
+        <div class="panel-body">
+          <div class="inline-form">
+            <input id="room-name" maxlength="60" placeholder="Room name, such as platform or payments">
+            <button class="btn" id="room-go">Create room</button>
+          </div>
+          <div class="err" id="room-err" hidden></div>
+        </div>
+      </div>` : ''}
+
+      ${rooms.map((r) => `<div class="panel">
+        <div class="panel-head">
+          <h2>${esc(r.name)}</h2>
+          <div class="right">
+            <span class="state">${r.members.length} member${r.members.length === 1 ? '' : 's'}</span>
+            ${canAdmin && r.name !== 'general'
+              ? `<button class="btn danger sm" data-del-room="${esc(r.id)}">Delete</button>` : ''}
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="lbl">Areas</div>
+          <p class="${r.areas.length ? 'mono' : 'dim'}">${r.areas.length
+            ? r.areas.map((a) => `${esc(areaLabel(a))}${canAdmin
+                ? ` <button class="linkish" data-rm-area="${esc(r.id)}" data-repo="${esc(a.repo)}" data-area="${esc(a.area)}">remove</button>` : ''}`).join(' &middot; ')
+            : 'No areas yet &mdash; nobody in this room coordinates on anything.'}</p>
+          ${canAdmin ? `<div class="inline-form" style="margin-top:12px">
+            <select data-area-repo="${esc(r.id)}">
+              <option value="*">every repository</option>
+              ${repos.map((x) => `<option value="${esc(x.repo)}">${esc(x.repo)}</option>`).join('')}
+            </select>
+            <input data-area-path="${esc(r.id)}" maxlength="120" placeholder="Path prefix, or / for the whole repo" value="/">
+            <button class="btn quiet" data-add-area="${esc(r.id)}">Add area</button>
+          </div>` : ''}
+
+          <div class="lbl" style="margin-top:20px">Members</div>
+          ${r.members.length ? `<table class="rows">
+            <tbody>${r.members.map((m) => `<tr>
+              <td>${esc(m.email)}${m.id === me?.member_id ? '<span class="tag mine">you</span>' : ''}</td>
+              <td class="dim">${esc(m.role)}</td>
+              <td class="right">${canAdmin
+                ? `<button class="btn quiet sm" data-rm-member="${esc(r.id)}" data-member="${esc(m.id)}">Remove</button>` : ''}</td>
+            </tr>`).join('')}</tbody></table>` : '<p class="dim">Nobody yet.</p>'}
+          ${canAdmin ? `<div class="inline-form" style="margin-top:12px">
+            <select data-member-pick="${esc(r.id)}">
+              ${members.filter((m) => !r.members.some((x) => x.id === m.id))
+                .map((m) => `<option value="${esc(m.id)}">${esc(m.email)}</option>`).join('')}
+            </select>
+            <button class="btn quiet" data-add-member="${esc(r.id)}">Add to room</button>
+          </div>` : ''}
+          <div class="err" data-room-err="${esc(r.id)}" hidden></div>
+        </div>
+      </div>`).join('')}
+    </div>`;
+
+  const fail = (room: string, e: unknown): void => {
+    const el = viewEl.querySelector<HTMLElement>(`[data-room-err="${room}"]`);
+    if (!el) return;
+    el.textContent = (e as Error).message;
+    el.hidden = false;
+  };
+  const again = async (): Promise<void> => { await refreshRelayTeam(); viewRooms(); };
+
+  $('#room-go')?.addEventListener('click', async () => {
+    const err = $('#room-err') as HTMLElement;
+    err.hidden = true;
+    const name = ($('#room-name') as HTMLInputElement).value.trim();
+    if (!name) { err.textContent = 'A room needs a name.'; err.hidden = false; return; }
+    try {
+      await api('/api/rooms', { method: 'POST', body: JSON.stringify({ name }) });
+      await again();
+    } catch (e) { err.textContent = (e as Error).message; err.hidden = false; }
+  });
+
+  for (const b of viewEl.querySelectorAll<HTMLButtonElement>('[data-add-area]')) {
+    b.addEventListener('click', async () => {
+      const room = b.dataset.addArea!;
+      const repo = viewEl.querySelector<HTMLSelectElement>(`[data-area-repo="${room}"]`)!.value;
+      const area = viewEl.querySelector<HTMLInputElement>(`[data-area-path="${room}"]`)!.value.trim() || '/';
+      try {
+        await api(`/api/rooms/${encodeURIComponent(room)}/areas`, {
+          method: 'POST', body: JSON.stringify({ repo, area }),
+        });
+        await again();
+      } catch (e) { fail(room, e); }
+    });
+  }
+
+  for (const b of viewEl.querySelectorAll<HTMLButtonElement>('[data-rm-area]')) {
+    b.addEventListener('click', async () => {
+      const room = b.dataset.rmArea!;
+      try {
+        await api(`/api/rooms/${encodeURIComponent(room)}/areas`, {
+          method: 'POST',
+          body: JSON.stringify({ repo: b.dataset.repo, area: b.dataset.area, remove: true }),
+        });
+        await again();
+      } catch (e) { fail(room, e); }
+    });
+  }
+
+  for (const b of viewEl.querySelectorAll<HTMLButtonElement>('[data-add-member]')) {
+    b.addEventListener('click', async () => {
+      const room = b.dataset.addMember!;
+      const member = viewEl.querySelector<HTMLSelectElement>(`[data-member-pick="${room}"]`)?.value;
+      if (!member) { fail(room, new Error('Everyone in the team is already in this room.')); return; }
+      try {
+        await api(`/api/rooms/${encodeURIComponent(room)}/members`, {
+          method: 'POST', body: JSON.stringify({ member }),
+        });
+        await again();
+      } catch (e) { fail(room, e); }
+    });
+  }
+
+  for (const b of viewEl.querySelectorAll<HTMLButtonElement>('[data-rm-member]')) {
+    b.addEventListener('click', async () => {
+      const room = b.dataset.rmMember!;
+      try {
+        await api(`/api/rooms/${encodeURIComponent(room)}/members`, {
+          method: 'POST', body: JSON.stringify({ member: b.dataset.member, remove: true }),
+        });
+        await again();
+      } catch (e) { fail(room, e); }
+    });
+  }
+
+  for (const b of viewEl.querySelectorAll<HTMLButtonElement>('[data-del-room]')) {
+    b.addEventListener('click', async () => {
+      const room = b.dataset.delRoom!;
+      if (!confirm('Delete this room? The people in it keep their keys; they stop sharing the areas this room held.')) return;
+      try {
+        await api(`/api/rooms/${encodeURIComponent(room)}/delete`, { method: 'POST' });
+        await again();
+      } catch (e) { fail(room, e); }
+    });
+  }
+}
+
 /* ---- team ---- */
 async function viewTeam(): Promise<void> {
+  const canAdmin = role === 'owner' || role === 'admin';
+  const relayMembers = relayTeam?.members ?? [];
   viewEl.innerHTML = `
     <div class="page">
       <div class="page-head">
         <div>
           <h1>Team</h1>
-          <p>Everyone here can see the log and manage agent tokens. You are signed in as ${esc(role)}.</p>
+          <p>Everyone here can see the log and hold keys of their own. You are signed in as ${esc(role)}.</p>
         </div>
       </div>
       <div class="panel">
         <div class="panel-head"><h2>Members</h2></div>
         <div id="members"><div class="empty">Loading members.</div></div>
       </div>
-      <div class="panel">
+      ${canAdmin && configured ? `<div class="panel">
         <div class="panel-head"><h2>Invite a teammate</h2></div>
         <div class="panel-body">
-          <p>Send them the sign-up link and the team name. They join this team when they create an account with an email on your domain.</p>
-          <div class="cmd-row" style="margin-top:14px"><code>${esc(location.origin)}/app/#signup</code><button class="copy" type="button">Copy</button></div>
+          <p>An invitation is to a person, not a link anyone can use: it only works for the address it was sent to, and it lapses after seven days. Nothing is emailed from here &mdash; send them the link yourself.</p>
+          <div class="inline-form" style="margin-top:14px">
+            <input id="inv-email" type="email" placeholder="their@email.com">
+            <select id="inv-role">
+              <option value="member">Member</option>
+              <option value="admin">Admin</option>
+            </select>
+            <button class="btn" id="inv-go">Create invitation</button>
+          </div>
+          <div id="inv-out"></div>
+          <div class="err" id="inv-err" hidden></div>
         </div>
-      </div>
+      </div>` : ''}
+      ${canAdmin && !configured ? `<div class="panel">
+        <div class="panel-head"><h2>Add a teammate</h2></div>
+        <div class="panel-body">
+          <p>This relay has no sign-in behind it, so there is nobody to invite &mdash; you create the person and hand them a key. The key is shown once and cannot be read again; send it over something private.</p>
+          <div class="inline-form" style="margin-top:14px">
+            <input id="add-email" type="email" placeholder="their@email.com">
+            <input id="add-label" type="text" placeholder="their machine" value="first machine">
+            <select id="add-role">
+              <option value="member">Member</option>
+              <option value="admin">Admin</option>
+            </select>
+            <button class="btn" id="add-go">Add and mint a key</button>
+          </div>
+          <div id="add-out"></div>
+          <div class="err" id="add-err" hidden></div>
+        </div>
+      </div>` : ''}
+      ${configured ? `<div class="panel">
+        <div class="panel-head"><h2>Outstanding invitations</h2></div>
+        <div id="invites"><div class="empty">Loading invitations.</div></div>
+      </div>` : ''}
     </div>`;
   wireCopyButtons(viewEl);
 
-  try {
-    const sb = supabase!;
-    const { data, error } = await sb.from('team_members').select('user_id, email, role, created_at');
-    if (error) throw new Error(error.message);
-    const rows = (data ?? []) as Array<{ email: string; role: string; created_at: string }>;
-    $('#members')!.innerHTML = rows.length
-      ? `<table class="rows"><thead><tr><th>Email</th><th>Role</th><th>Joined</th></tr></thead>
-         <tbody>${rows.map((m) => `<tr><td>${esc(m.email)}</td><td class="dim">${esc(m.role)}</td>
-           <td class="dim">${esc(ago(Date.parse(m.created_at)))}</td></tr>`).join('')}</tbody></table>`
-      : `<div class="empty">Just you so far.</div>`;
-  } catch (e) {
-    $('#members')!.innerHTML = `<div class="empty">Could not load members: ${esc((e as Error).message)}</div>`;
-  }
+  /** The relay's own member row for a person, which is what holds their keys. */
+  const relayMemberFor = (email: string): RelayMember | undefined =>
+    relayMembers.find((m) => m.email.toLowerCase() === email.toLowerCase());
+
+  const paintInvites = async (): Promise<void> => {
+    try {
+      const rows = await listInvites();
+      $('#invites')!.innerHTML = rows.length
+        ? `<table class="rows"><thead><tr><th>Email</th><th>Role</th><th>Expires</th><th></th></tr></thead>
+           <tbody>${rows.map((i: Invite) => `<tr>
+             <td>${esc(i.email)}</td><td class="dim">${esc(i.role)}</td>
+             <td class="dim">${esc(ago(Date.parse(i.expires_at)))}</td>
+             <td class="right">${canAdmin ? `<button class="btn quiet sm" data-inv-revoke="${esc(i.id)}">Withdraw</button>` : ''}</td>
+           </tr>`).join('')}</tbody></table>`
+        : `<div class="empty">None outstanding.</div>`;
+      for (const b of viewEl.querySelectorAll<HTMLButtonElement>('[data-inv-revoke]')) {
+        b.addEventListener('click', async () => {
+          b.disabled = true;
+          try { await revokeInvite(b.dataset.invRevoke!); await paintInvites(); }
+          catch (e) { alert((e as Error).message); b.disabled = false; }
+        });
+      }
+    } catch (e) {
+      $('#invites')!.innerHTML = `<div class="empty">Could not load invitations: ${esc((e as Error).message)}</div>`;
+    }
+  };
+
+  const paintMembers = async (): Promise<void> => {
+    try {
+      // Where the list comes from depends on what is behind this relay.
+      // Supabase owns *people* when there is one; when there is not, the
+      // relay's own member rows are the whole truth — which is exactly the
+      // case that had no console at all until now.
+      const rows: Array<{ user_id: string; email: string; role: string; created_at: string }> =
+        configured
+          ? await (async () => {
+              const sb = supabase!;
+              const { data, error } = await sb
+                .from('team_members')
+                .select('user_id, email, role, created_at');
+              if (error) throw new Error(error.message);
+              return (data ?? []) as Array<{ user_id: string; email: string; role: string; created_at: string }>;
+            })()
+          : relayMembers
+              .filter((m) => !m.unassigned)
+              .map((m) => ({
+                // No Supabase user behind them, so no user id. The remove
+                // button keys off the relay member id instead.
+                user_id: '',
+                email: m.email,
+                role: m.role,
+                created_at: '',
+              }));
+      $('#members')!.innerHTML = rows.length
+        ? `<table class="rows"><thead><tr><th>Email</th><th>Role</th><th>Joined</th><th>Keys</th><th></th></tr></thead>
+           <tbody>${rows.map((m) => {
+             const rm = relayMemberFor(m.email);
+             const keys = (relayTeam?.tokens ?? []).filter((t) => rm && t.member_id === rm.id && !t.revoked).length;
+             return `<tr><td>${esc(m.email)}</td><td class="dim">${esc(m.role)}</td>
+               <td class="dim">${m.created_at ? esc(ago(Date.parse(m.created_at))) : '&mdash;'}</td>
+               <td class="dim">${keys}</td>
+               <td class="right">${canAdmin && m.role !== 'owner'
+                 ? `<button class="btn danger sm" data-remove="${esc(m.user_id)}" data-email="${esc(m.email)}" data-member="${esc(rm?.id ?? '')}">Remove</button>`
+                 : ''}</td></tr>`;
+           }).join('')}</tbody></table>`
+        : `<div class="empty">Just you so far.</div>`;
+
+      for (const b of viewEl.querySelectorAll<HTMLButtonElement>('[data-remove]')) {
+        b.addEventListener('click', async () => {
+          if (!confirm(`Remove ${b.dataset.email}? Their keys stop working at once. Nobody else's key changes.`)) return;
+          b.disabled = true;
+          try {
+            // Two systems, two steps: Supabase owns the person, the relay owns
+            // their keys and rooms. The relay half is what actually stops a
+            // machine coordinating, so it must not be skipped when the member
+            // has a row there. With no Supabase there is only the relay half.
+            if (configured && b.dataset.remove) await removeTeamMember(b.dataset.remove);
+            if (b.dataset.member) {
+              await api(`/api/members/${encodeURIComponent(b.dataset.member)}/remove`, { method: 'POST' });
+            }
+            await refreshRelayTeam();
+            await viewTeam();
+          } catch (e) { alert((e as Error).message); b.disabled = false; }
+        });
+      }
+    } catch (e) {
+      $('#members')!.innerHTML = `<div class="empty">Could not load members: ${esc((e as Error).message)}</div>`;
+    }
+  };
+
+  $('#add-go')?.addEventListener('click', async () => {
+    const err = $('#add-err') as HTMLElement;
+    err.hidden = true;
+    const email = ($('#add-email') as HTMLInputElement).value.trim();
+    const label = ($('#add-label') as HTMLInputElement).value.trim() || 'first machine';
+    const addRole = ($('#add-role') as HTMLSelectElement).value;
+    if (!email.includes('@')) { err.textContent = 'That does not look like an email address.'; err.hidden = false; return; }
+    try {
+      const made = await api<{ email: string; role: string; existing: boolean; token: string | null }>(
+        '/api/members',
+        { method: 'POST', body: JSON.stringify({ email, role: addRole, label }) },
+      );
+      if (made.existing) {
+        err.textContent = `${made.email} is already on this team as ${made.role}. Mint a key for them under Agent keys.`;
+        err.hidden = false;
+        return;
+      }
+      $('#add-out')!.innerHTML = `<div class="reveal">
+          <div class="lbl">${esc(made.email)}&rsquo;s key. Readable only now.</div>
+          <div class="val">${esc(made.token ?? '')}</div>
+        </div>
+        <div class="cmd-row"><code>knoot join ${esc(made.token ?? '')}</code><button class="copy" type="button">Copy</button></div>`;
+      wireCopyButtons($('#add-out')!);
+      ($('#add-email') as HTMLInputElement).value = '';
+      await refreshRelayTeam();
+      await paintMembers();
+    } catch (e) { err.textContent = (e as Error).message; err.hidden = false; }
+  });
+
+  $('#inv-go')?.addEventListener('click', async () => {
+    const err = $('#inv-err') as HTMLElement;
+    err.hidden = true;
+    const email = ($('#inv-email') as HTMLInputElement).value.trim();
+    const inviteRole = ($('#inv-role') as HTMLSelectElement).value as Invite['role'];
+    if (!email.includes('@')) { err.textContent = 'That does not look like an email address.'; err.hidden = false; return; }
+    try {
+      const secret = await inviteMember(email, inviteRole);
+      const link = `${location.origin}/app/#join=${secret}`;
+      $('#inv-out')!.innerHTML = `<div class="reveal">
+          <div class="lbl">Send ${esc(email)} this link. It is readable only now.</div>
+          <div class="val">${esc(link)}</div>
+        </div>
+        <div class="cmd-row"><code>${esc(link)}</code><button class="copy" type="button">Copy</button></div>`;
+      wireCopyButtons($('#inv-out')!);
+      ($('#inv-email') as HTMLInputElement).value = '';
+      await paintInvites();
+    } catch (e) { err.textContent = (e as Error).message; err.hidden = false; }
+  });
+
+  await paintMembers();
+  // There are no invitations without a sign-in to invite somebody to, and the
+  // panel that would hold them is not rendered.
+  if (configured) await paintInvites();
 }
 
 /* ---- settings ---- */
@@ -500,15 +879,59 @@ async function refreshRelayTeam(): Promise<void> {
   relayTeam = await api<TeamPayload>('/api/team');
 }
 
+/**
+ * An invitation secret parked in the URL fragment.
+ *
+ * Someone following an invite link is usually not signed in yet, so the token
+ * has to survive a sign-up, an email confirmation and a redirect back here.
+ * The fragment never reaches the server, and the value is taken out of both
+ * the URL and storage the moment it is used.
+ */
+const PENDING_INVITE = 'knoot.pendingInvite';
+
+function stashInvite(): void {
+  const m = location.hash.match(/^#join=(.+)$/);
+  if (!m) return;
+  try { localStorage.setItem(PENDING_INVITE, m[1]); } catch { /* private mode */ }
+  history.replaceState(null, '', `${location.pathname}#team`);
+}
+
+function takeInvite(): string | null {
+  const m = location.hash.match(/^#join=(.+)$/);
+  if (m) {
+    history.replaceState(null, '', `${location.pathname}#team`);
+    try { localStorage.removeItem(PENDING_INVITE); } catch { /* ignore */ }
+    return m[1];
+  }
+  try {
+    const v = localStorage.getItem(PENDING_INVITE);
+    localStorage.removeItem(PENDING_INVITE);
+    return v;
+  } catch { return null; }
+}
+
 async function boot(): Promise<void> {
   if (!configured) { showAuth(); return; }
   const { data } = await supabase!.auth.getSession();
-  if (!data.session) { showAuth(); return; }
+  if (!data.session) { stashInvite(); showAuth(); return; }
 
   bootEl.hidden = false;
   authEl.hidden = true;
   try {
-    const found = await loadTeam();
+    const invite = takeInvite();
+    let found = await loadTeam();
+    if (!found && invite) {
+      // An invited person must join the team that invited them. Falling
+      // through to `createTeam` here would put them in a team of one with the
+      // same name they were expecting, which looks like it worked.
+      try {
+        await acceptInvite(invite);
+        found = await loadTeam();
+      } catch (e) {
+        bootEl.textContent = `That invitation could not be used: ${(e as Error).message}`;
+        return;
+      }
+    }
     if (!found) {
       // First sign-in after confirming: make the team, using the name asked
       // for at sign-up if it survived in this browser.

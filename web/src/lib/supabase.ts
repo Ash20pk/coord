@@ -89,3 +89,64 @@ export async function createTeam(name: string): Promise<Team> {
   if (error) throw new Error(error.message);
   return data as Team;
 }
+
+export type Invite = {
+  id: string;
+  email: string;
+  role: 'admin' | 'member';
+  created_at: string;
+  expires_at: string;
+};
+
+/**
+ * Invite someone by email. Returns the secret once — only its hash is stored,
+ * so there is no way to read an outstanding invitation back out afterwards.
+ * Whoever invites has to pass the link on themselves; nothing here sends mail.
+ */
+export async function inviteMember(email: string, role: Invite['role'] = 'member'): Promise<string> {
+  const sb = requireClient();
+  const { data, error } = await sb.rpc('invite_member', { invite_email: email, invite_role: role });
+  if (error) throw new Error(error.message);
+  return data as string;
+}
+
+export async function listInvites(): Promise<Invite[]> {
+  const sb = requireClient();
+  const { data, error } = await sb
+    .from('invites')
+    .select('id, email, role, created_at, expires_at')
+    .is('accepted_at', null)
+    .order('created_at');
+  if (error) throw new Error(error.message);
+  return (data ?? []) as Invite[];
+}
+
+export async function revokeInvite(id: string): Promise<void> {
+  const sb = requireClient();
+  const { error } = await sb.rpc('revoke_invite', { invite_id: id });
+  if (error) throw new Error(error.message);
+}
+
+/**
+ * Join the team an invitation was for. The join and the invitation's closure
+ * are one transaction in Postgres, so a failure cannot leave someone signed in
+ * with a team they cannot see and a secret they cannot use again.
+ */
+export async function acceptInvite(token: string): Promise<Team> {
+  const sb = requireClient();
+  const { data, error } = await sb.rpc('accept_invite', { invite_token: token });
+  if (error) throw new Error(error.message);
+  return data as Team;
+}
+
+/**
+ * Take a person out of the team. This is the Supabase half; their device keys
+ * live on the relay and are revoked through `/api/members/:id/remove`, which
+ * the console calls straight afterwards. Two steps, because a relay that
+ * accepted a webhook from anywhere would be a worse trade.
+ */
+export async function removeTeamMember(userId: string): Promise<void> {
+  const sb = requireClient();
+  const { error } = await sb.rpc('remove_member', { member_user: userId });
+  if (error) throw new Error(error.message);
+}
