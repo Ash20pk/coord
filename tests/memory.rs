@@ -284,6 +284,7 @@ impl Peer {
             paths: paths.iter().map(|p| p.to_string()).collect(),
             hashes: Default::default(),
             decisions: Vec::new(),
+            derived: false,
         };
         let plain = serde_json::to_vec(&fact).unwrap();
         let id = format!("sh_{}", uuid::Uuid::new_v4().simple());
@@ -578,6 +579,97 @@ async fn a_peers_declared_plan_reaches_the_next_turn_of_a_session_in_the_area() 
     // And priya is not told her own plan back — that budget is for peers'.
     let hers = prompt(&c.sock, &root, "s-priya", "priya", "carry on");
     assert!(!hers.contains("pooled one"), "an agent does not need its own plan:\n{hers}");
+}
+
+/// The lab run's negative result, closed: **an agent that never runs `knoot
+/// plan` still tells its peers what it is doing.**
+///
+/// Four Haiku agents were told outright to publish a plan and `plans
+/// published` was 0, which made phase 6 a feature that did not exist on the
+/// weakest model in the room. So the daemon composes one from the intent the
+/// session already declared and the paths it already holds — both of which
+/// were on the log before this ran, which is why composing them discloses
+/// nothing new.
+#[tokio::test]
+async fn a_session_that_never_ran_plan_still_tells_its_peers_what_it_is_doing() {
+    let (c, root, _) = repo("compose").await;
+    joins(&c.sock, &root, "s-ash", "ash");
+    joins(&c.sock, &root, "s-priya", "priya");
+
+    // Priya works. She does not run `knoot plan`, because nobody does.
+    pre_write(&c.sock, &root, "s-priya", "priya", "src/http/client.rs");
+    prompt(&c.sock, &root, "s-priya", "priya", "replace the http client with a pooled one");
+    settle().await;
+
+    let brief = prompt(&c.sock, &root, "s-ash", "ash", "add retries to the http layer");
+    assert!(brief.contains("what your peers are doing"), "no context section:\n{brief}");
+    assert!(brief.contains("pooled one"), "what priya is doing:\n{brief}");
+    assert!(brief.contains("src/http/client.rs"), "and where:\n{brief}");
+    // In the voice its evidence supports. A scraped intent presented as a
+    // declared plan is a guess wearing somebody else's confidence.
+    assert!(
+        brief.contains("appears to be working on"),
+        "a composed context must not read as a declared plan:\n{brief}"
+    );
+}
+
+/// And it composes from *declarations*, never from the turn. The prompt is
+/// the only text that reaches the daemon, an intent is the first 160
+/// characters of it, and that sentence was broadcast to every peer the moment
+/// it was declared. Nothing else about the turn is published, and nothing is
+/// summarised: the composed text is the intent, verbatim.
+#[tokio::test]
+async fn a_composed_context_is_the_declared_intent_and_nothing_else() {
+    let (c, root, _) = repo("composeonly").await;
+    joins(&c.sock, &root, "s-ash", "ash");
+    joins(&c.sock, &root, "s-priya", "priya");
+
+    prompt(&c.sock, &root, "s-priya", "priya", "rewrite the retry loop");
+    settle().await;
+
+    let listed = recall(&c.sock, &root);
+    assert!(listed.contains("rewrite the retry loop"), "the intent, verbatim:\n{listed}");
+}
+
+/// A session that says what it is doing on purpose is not then overwritten by
+/// a scrape of its own prompt. Both supersede by session id, so the composer
+/// has to stand down once a plan is declared — otherwise the next turn
+/// replaces "one shared client, not one per module" with a sentence that
+/// knows none of that.
+#[tokio::test]
+async fn a_declared_plan_is_never_replaced_by_a_composed_one() {
+    let (c, root, _) = repo("declared").await;
+    joins(&c.sock, &root, "s-ash", "ash");
+    joins(&c.sock, &root, "s-priya", "priya");
+
+    plan(
+        &c.sock,
+        &root,
+        "s-priya",
+        &[
+            "--path",
+            "src/http/client.rs",
+            "--decided",
+            "one shared client, not one per module",
+            "replacing the http client with a pooled one",
+        ],
+    );
+    settle().await;
+    // Several more turns, each with an intent the composer would have used.
+    prompt(&c.sock, &root, "s-priya", "priya", "now fix the connection timeout handling");
+    prompt(&c.sock, &root, "s-priya", "priya", "and the backoff constants");
+    settle().await;
+
+    let brief = prompt(&c.sock, &root, "s-ash", "ash", "go");
+    assert!(brief.contains("pooled one"), "the declared plan is gone:\n{brief}");
+    assert!(brief.contains("decided: one shared client"), "and its decisions:\n{brief}");
+    // The intent still shows in the presence line, which is where an intent
+    // belongs. What must not exist is a *composed* context for that session:
+    // the composer stood down when the plan was declared.
+    assert!(
+        !brief.contains("appears to be working on"),
+        "a composed context overwrote a declared plan:\n{brief}"
+    );
 }
 
 /// A session's context is memory in the sense that a room is a memory: it

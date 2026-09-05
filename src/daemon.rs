@@ -88,6 +88,16 @@ struct RepoConn {
     /// trustworthy. Until then we must not answer from an empty view.
     ready: Arc<Mutex<bool>>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<ServerMsg>>>>,
+    /// Sessions that ran `knoot plan`. Once a session has said what it is
+    /// doing on purpose, the daemon stops composing for it: a composed
+    /// context supersedes by session id, so continuing would overwrite the
+    /// declared plan with a scrape of the same session's intent sentence.
+    declared: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// The last context this daemon composed per session, as a fingerprint.
+    /// A turn that changes neither the intent nor the paths republishes
+    /// nothing — a shard costs a seal and a round trip, and a plan that has
+    /// not moved is not news.
+    composed: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl RepoConn {
@@ -438,6 +448,10 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
             let touched = session_paths(&rc, &session);
             let memory = memory_lines(&rc, &repo_root, &touched);
             let cached = cache_lines(&rc, &repo_root, &touched);
+            // Publish what this session is doing before reading what its
+            // peers are. Nobody runs `knoot plan`, so the daemon composes one
+            // from the intent just recorded and the paths already claimed.
+            compose_context(&rc, &repo_root, &session, &user);
             // Every peer's context, not only those touching our paths: the
             // point is to learn what somebody else is doing *before* the
             // paths overlap, which is the moment it stops being avoidable.
@@ -744,6 +758,7 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                 &text,
                 &paths,
                 &[],
+                false,
             ) {
                 Ok(name) => DResp::Memory {
                     items: vec![name],
@@ -772,8 +787,17 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                 &text,
                 &paths,
                 &decisions,
+                false,
             ) {
-                Ok(_) => DResp::Ok,
+                Ok(_) => {
+                    // From here the daemon composes nothing for this session.
+                    // A declared plan says what the approach is; a composed
+                    // one is the intent sentence rearranged, and superseding
+                    // the first with the second would lose the only thing
+                    // worth having.
+                    rc.declared.lock().unwrap().insert(session.clone());
+                    DResp::Ok
+                }
                 Err(msg) => DResp::Err { msg },
             }
         }
@@ -792,6 +816,7 @@ async fn handle_req(req: DReq, d: &Arc<Daemon>) -> DResp {
                 &text,
                 &paths,
                 &[],
+                false,
             ) {
                 Ok(name) => DResp::Memory {
                     items: vec![name],
@@ -1368,16 +1393,84 @@ fn cache_lines(rc: &Arc<RepoConn>, repo_root: &str, paths: &[String]) -> Vec<Str
 /// This is memory in the sense that a room is a memory — it exists while
 /// people are in it. `mine` is dropped: an agent does not need its own plan
 /// read back, and that budget is what a peer's plan needs.
+/// Publish what this session appears to be doing, without it running a
+/// command.
+///
+/// The lab run of 4 September found `plans published 0`: not one Haiku agent
+/// ran `knoot plan`, though the prompt asked it to outright. That is gap 1's
+/// original finding recurring — a cheap model does not run a command it is
+/// told to run — and it meant phase 6 was, on the weakest model in the room,
+/// a feature that did not exist. So the daemon composes one.
+///
+/// **It composes only from what the session already declared and knoot has
+/// already broadcast**: the intent sentence it sent on `UserPromptSubmit`,
+/// and the paths it holds claims on. Both are on the log and in every peer's
+/// `knoot who` before this function runs, so a composed context discloses
+/// nothing that was not already shared — which is what makes it compatible
+/// with the rule that nothing is ever derived from a transcript. There is no
+/// summarisation here, and there must never be: the moment this reads more of
+/// a turn than the agent published on purpose, it becomes the exfiltration
+/// path the design refused.
+///
+/// Three things stop it becoming noise: a session that ran `knoot plan` is
+/// left alone, an unchanged intent-and-paths republishes nothing, and the
+/// shard is marked `derived` so a peer is told it is a guess.
+///
+/// Failure is silent by construction. This runs inside a turn; a refusal, an
+/// unidentified key or a dead relay must cost that turn nothing.
+fn compose_context(rc: &Arc<RepoConn>, repo_root: &str, session: &str, user: &str) {
+    if rc.declared.lock().unwrap().contains(session) {
+        return;
+    }
+    let intent = {
+        let v = rc.view.lock().unwrap();
+        v.sessions.get(session).map(|s| s.intent.clone()).unwrap_or_default()
+    };
+    let intent = intent.trim().to_string();
+    if intent.is_empty() {
+        return;
+    }
+    let paths = session_paths(rc, session);
+    let print = format!("{intent}\u{0}{}", paths.join("\u{0}"));
+    if rc.composed.lock().unwrap().get(session) == Some(&print) {
+        return;
+    }
+    if publish_shard(
+        rc,
+        repo_root,
+        session,
+        user,
+        crate::memory::Kind::SessionContext,
+        session,
+        &intent,
+        &paths,
+        &[],
+        true,
+    )
+    .is_ok()
+    {
+        rc.composed.lock().unwrap().insert(session.to_string(), print);
+    }
+}
+
 fn context_lines(rc: &Arc<RepoConn>, mine: &str) -> Vec<String> {
     let cache = rc.mem.lock().unwrap();
     let mut out = Vec::new();
     let mut used = 0;
     for h in cache.peer_context(mine) {
-        let mut line = format!(
-            "{} is working on: {}",
-            h.shard.author_email,
-            truncate(&h.fact.text, 240)
-        );
+        // A declared plan and a composed one do not get the same voice. The
+        // first is what a peer decided to tell you; the second is its intent
+        // sentence and its claims, which supports "appears to be" and nothing
+        // stronger.
+        let mut line = if h.fact.derived {
+            format!(
+                "{} appears to be working on (from their intent and claims, not a declared plan): {}",
+                h.shard.author_email,
+                truncate(&h.fact.text, 240)
+            )
+        } else {
+            format!("{} is working on: {}", h.shard.author_email, truncate(&h.fact.text, 240))
+        };
         if !h.fact.paths.is_empty() {
             line.push_str(&format!("  [in: {}]", h.fact.paths.join(", ")));
         }
@@ -1438,6 +1531,7 @@ fn publish_shard(
     text: &str,
     paths: &[String],
     decisions: &[String],
+    derived: bool,
 ) -> Result<String, String> {
     use crate::memory::{self};
 
@@ -1498,6 +1592,7 @@ fn publish_shard(
         paths: paths.to_vec(),
         hashes,
         decisions: decisions.to_vec(),
+        derived,
     };
     let plain = serde_json::to_vec(&fact).map_err(|e| e.to_string())?;
 
@@ -2315,6 +2410,8 @@ async fn ensure_repo(d: &Arc<Daemon>, repo_root: &str) -> Option<Arc<RepoConn>> 
         last_error: Arc::new(Mutex::new(None)),
         ready: Arc::new(Mutex::new(false)),
         pending: Arc::new(Mutex::new(HashMap::new())),
+        declared: Arc::new(Mutex::new(Default::default())),
+        composed: Arc::new(Mutex::new(HashMap::new())),
     });
     d.repos.lock().unwrap().insert(repo_root.to_string(), rc.clone());
     tokio::spawn(relay_loop(cfg, rc.clone(), rx));

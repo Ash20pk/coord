@@ -356,10 +356,18 @@ Three kinds, all scoped to an area and all reaching an agent unasked:
 | **repo_cache** | something derived: where a symbol lives, how the tests run | 14 days, **dropped** the moment its files change |
 | **session_context** | what a session is doing now, and what it has settled | the session |
 
-`knoot plan` is the one worth knowing about. An intent is one line scraped from
-a prompt; a plan says what the approach is and what has already been settled,
-which is what stops a peer designing against work in progress. It appears at the
-top of every same-area session's next turn.
+Nobody has to run anything for the third row. Every turn, the daemon publishes
+what a session appears to be doing, composed from the intent it declared and the
+files it holds — a lab run found that agents told outright to publish a plan
+simply did not, so this cannot be a command. It is marked as composed, and reads
+that way to a peer: *appears to be working on*, not a plan they wrote.
+
+`knoot plan` is what a capable agent adds on top, and it is the one worth
+knowing about. An intent is one line scraped from a prompt; a plan says what the
+approach is and what has already been settled, which is what stops a peer
+designing against work in progress. Once a session declares one, the daemon
+stops composing for it — a scrape must never overwrite a plan. Either way it
+appears at the top of every same-area session's next turn.
 
 A fact names the paths it is about, and that is what makes it more than a note:
 a write to one of those files marks the fact *possibly stale* and names who

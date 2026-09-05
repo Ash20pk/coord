@@ -274,14 +274,27 @@ directions are now tested from the run's own prompts —
 `a_preamble_every_agent_was_handed_is_not_a_shared_task` and
 `a_shared_preamble_does_not_hide_a_genuinely_shared_task`.
 
-*And a negative result about phase 6.* `plans published 0`, `peers' plans seen
-0`. Not one agent ran `knoot plan`, though the prompt asked it to — which is
-gap 1's original finding recurring: **a cheap model does not run a command it
-is told to run.** Publishing session context is currently a command, so on
-these models it is a feature that does not exist. Either the daemon composes
-one from what the agent already declares, or it should be documented as
-Opus-only. That is the next real question, and it was invisible until the arm
-was run.
+*And a negative result about phase 6 — now closed.* `plans published 0`,
+`peers' plans seen 0`. Not one agent ran `knoot plan`, though the prompt asked
+it to — which is gap 1's original finding recurring: **a cheap model does not
+run a command it is told to run.** Publishing session context was a command, so
+on these models it was a feature that did not exist.
+
+The fix is gap 1's fix applied to phase 6: **the daemon composes it.** On every
+turn it publishes what a session appears to be doing, from the intent that
+session declared and the paths it holds — both of which were already on the log
+and already in every peer's `knoot who` before the composer ran, which is what
+makes this compatible with the rule that nothing is derived from a transcript.
+There is no summarisation and there must never be; the composed text is the
+intent, verbatim. Three things keep it from becoming noise: a session that ran
+`knoot plan` is left alone (a composed context supersedes by session id, so
+continuing would overwrite a real plan with a scrape of the same session's
+prompt), an unchanged intent and path set republishes nothing, and the shard is
+marked `derived` so a peer reads *"appears to be working on (from their intent
+and claims, not a declared plan)"* rather than a guess in a plan's voice.
+`knoot plan` remains, and is now the thing it should always have been: how a
+capable model says what the *approach* is and what has been settled, which no
+intent sentence can carry.
 
 *One thing that is not a bug.* Every claim is attributed to
 `lab@knoot.local`, because four agents on one machine share one device key and
@@ -343,8 +356,10 @@ rests on, so validation still comes before any further building._
    `cross_branch_overlap` and `ungated_write` — and now also whether anybody
    ran `knoot plan`, because on cheap models nobody did.
 
-**One thing to fix before that week, found by the run:** publishing session
-context is a *command*, and no Haiku agent ran it despite being told to. Either
-the daemon composes it from what the agent already declares, or `knoot plan` is
-documented as Opus-only. Shipping a design-partner week with a feature the
-weakest model in the room cannot use would waste the week.
+~~**One thing to fix before that week, found by the run:** publishing session
+context is a *command*, and no Haiku agent ran it despite being told to.~~
+Done: the daemon now composes a session's context from the intent and claims it
+has already declared, marked as derived so it is never read as a declared plan,
+and standing down for any session that ran `knoot plan` itself. Phase 6 no
+longer depends on a command the weakest model in the room will not run — so the
+week can read `plans seen` and learn something from the answer.

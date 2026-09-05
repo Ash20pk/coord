@@ -334,7 +334,7 @@ the docs, in those words.
 |---|---|---|---|---|
 | `facts` | Durable statements: interface decisions, conventions, gotchas; each names the paths it is about | agent or person, on purpose: `knoot remember` / a tool call / `--from <path>` | on | 90 d, superseded chains kept |
 | `repo_cache` | Derived knowledge: where a symbol lives, how tests run, what a module does | daemon, on request, structured | on | 14 d, invalidated by `FileWritten` |
-| `session_context` | `{plan, paths_touched, decisions[]}` — structured, agent-authored, for peers in the area *now* | agent, via tool; never derived from the transcript | on | session; deleted when the session ends |
+| `session_context` | `{plan, paths_touched, decisions[]}` — structured, for peers in the area *now* | agent, via tool; **or** composed by the daemon from the intent and claims that session already declared, marked `derived`. Never from the transcript. | on | session; deleted when the session ends |
 
 `project_files` is gone. Its honest use is one `knoot remember --from
 CLAUDE.md`, through the same refusal rules as everything else.
@@ -770,8 +770,32 @@ quiet one:
      publishes `session_context` at the `Stop` boundary. But the value of a
      plan is highest before the work happens, and holding it until the turn
      ends means a peer starting a turn in that minute is told nothing. So
-     `knoot plan` publishes when it is run. The rule §4.5 was protecting is
-     untouched: the daemon still never *composes* one.
+     `knoot plan` publishes when it is run.
+
+   - **The daemon composes one after all — from declarations, never from the
+     turn.** This draft said it never would, and the lab run of 4 September
+     said the draft was wrong: `plans published 0`, because no Haiku agent
+     ran the command. A feature the weakest model in the room cannot reach is
+     not a feature. So on every `UserPromptSubmit` the daemon publishes what
+     the session appears to be doing, composed from its declared intent and
+     the paths it holds.
+
+     The rule §4.5 was protecting is untouched, and it is worth being exact
+     about why. What that rule forbids is a *free-text conclusion pulled out
+     of a transcript* — unreviewed text, that no one chose to publish,
+     leaving the machine. The composer reads neither the transcript nor the
+     turn: its two inputs were declared by the agent and broadcast to every
+     peer before it ran, so it discloses nothing that was not already shared,
+     and it summarises nothing — the text is the intent, verbatim. If that
+     ever stops being true, this becomes the exfiltration path the design
+     refused.
+
+     Three guards: a session that ran `knoot plan` is left alone, because
+     both supersede by session id and a scrape must never replace a plan; an
+     unchanged intent and path set republishes nothing; and the shard carries
+     `derived`, so a peer is told *"appears to be working on (from their
+     intent and claims, not a declared plan)"*. A guess in a plan's voice
+     would be worse than no plan.
    - **A cache entry is dropped when its files move, not flagged.** §4.1 gives
      every kind temporal supersession, and for a fact the flag is right — a
      human wrote it on purpose and "priya changed this since" is what its
@@ -875,6 +899,9 @@ of `teams.rs`.
 - `a_removed_device_cannot_derive_the_next_epoch`
 - `a_dotenv_is_refused_and_the_refusal_is_logged`
 - `session_context_does_not_outlive_the_session`
+- `a_session_that_never_ran_plan_still_tells_its_peers_what_it_is_doing`
+- `a_composed_context_is_the_declared_intent_and_nothing_else`
+- `a_declared_plan_is_never_replaced_by_a_composed_one`
 - `a_missing_provider_injects_no_memory_and_denies_no_write`
 
 ## Sources

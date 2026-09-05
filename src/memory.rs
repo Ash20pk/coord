@@ -144,6 +144,16 @@ pub struct Fact {
     /// kinds. A peer that knows a decision has been made does not re-open it.
     #[serde(default)]
     pub decisions: Vec<String>,
+    /// True when the daemon composed this rather than an agent writing it on
+    /// purpose. Only `session_context` is ever composed, and only from
+    /// declarations the session had already published — its intent and the
+    /// paths it holds.
+    ///
+    /// It is carried so a reader is never told a guess in the voice of a
+    /// plan: a composed context says what a session *appears* to be doing,
+    /// because that is all its intent sentence supports.
+    #[serde(default)]
+    pub derived: bool,
 }
 
 /// A shard as it travels and as the relay stores it. The relay holds
@@ -1094,6 +1104,7 @@ mod tests {
             paths: paths.iter().map(|p| p.to_string()).collect(),
             hashes: Default::default(),
             decisions: Vec::new(),
+            derived: false,
         }
     }
 
