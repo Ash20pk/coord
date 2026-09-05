@@ -34,6 +34,31 @@ knoot_metrics() {
             json_extract(json,'\$.holder_user') as holder
        from events where repo='$repo' and $q='ungated_write' order by seq;"
   echo
+  echo "--- add/add: two agents creating one file ---"
+  sqlite3 "$db" -column -header \
+    "select json_extract(json,'\$.user') as writer, json_extract(json,'\$.path') as path,
+            json_extract(json,'\$.peer_user') as created_by
+       from events where repo='$repo' and $q='create_collision' order by seq;"
+  echo
+  echo "--- stale reads: wrote after the ground moved ---"
+  sqlite3 "$db" -column -header \
+    "select json_extract(json,'\$.user') as reader, json_extract(json,'\$.path') as path,
+            json_extract(json,'\$.peer_user') as writer,
+            (json_extract(json,'\$.write_ts') - json_extract(json,'\$.read_ts'))/1000 as secs_behind
+       from events where repo='$repo' and $q='stale_read' order by seq;"
+  echo
+  echo "--- deletions (and who was standing on them) ---"
+  sqlite3 "$db" -column -header \
+    "select json_extract(json,'\$.user') as who, json_extract(json,'\$.path') as path,
+            json_extract(json,'\$.moved') as moved
+       from events where repo='$repo' and $q='path_removed' order by seq;"
+  echo
+  echo "--- duplicate tasks ---"
+  sqlite3 "$db" -column -header \
+    "select json_extract(json,'\$.user') as user, json_extract(json,'\$.peer_user') as peer,
+            substr(json_extract(json,'\$.peer_text'),1,50) as their_task
+       from events where repo='$repo' and $q='duplicate_intent' order by seq;"
+  echo
   echo "--- messages between agents ---"
   sqlite3 "$db" -column -header \
     "select json_extract(json,'\$.from_user') as from_user,
@@ -43,7 +68,8 @@ knoot_metrics() {
 
   local n
   echo
-  for t in claim_acquired file_written claim_denied ungated_write message path_freed; do
+  for t in claim_acquired file_written claim_denied ungated_write message path_freed \
+           stale_read create_collision path_removed duplicate_intent; do
     n=$(sqlite3 "$db" "select count(*) from events where repo='$repo' and $q='$t'")
     printf '%-16s %s\n' "$t" "$n"
   done

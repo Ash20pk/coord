@@ -1,0 +1,2 @@
+relay = "ws://127.0.0.1:7499/ws"
+repo = "knoot-7cfd905a1a7c48e4"

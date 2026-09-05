@@ -146,6 +146,14 @@ Paste one into each pane. The first two collide on `src/auth.js` on purpose.
             invoiceTotal.
 4. ci-bot — Add input validation to the handler in src/api.js.
 EOF
+  # src/types.js is what auth.js and billing.js both need, which makes it the
+  # file every agent reaches for and nobody can hold for ten minutes without
+  # stalling the room. Declaring it means the first three collisions on it are
+  # skipped rather than suffered.
+  cat > src/types.js <<'EOF'
+// Shared shapes both auth.js and billing.js depend on. Everyone edits this.
+module.exports = {};
+EOF
   git add -A && git commit -qm "seed"
 fi
 
@@ -153,7 +161,10 @@ fi
 if [[ "${1:-start}" == "web" ]]; then
   [[ -d "$LAB/.git" ]] || die "seed the lab first: ./lab/lab.sh reset"
   pgrep -f "knoot daemon" >/dev/null || { "$COORD" daemon >/tmp/knoot-daemon.log 2>&1 & sleep 0.5; }
-  [[ -f "$LAB/.knoot.toml" ]] || (cd "$LAB" && "$COORD" init --relay "$RELAY_URL" >/dev/null)
+  if [[ ! -f "$LAB/.knoot.toml" ]]; then
+    (cd "$LAB" && "$COORD" init --relay "$RELAY_URL" >/dev/null)
+    printf 'hubs = ["src/types.js", "test.js"]\n' >> "$LAB/.knoot.toml"
+  fi
   echo "starting relay with browser terminals ..."
   "$COORD" relay --listen "$RELAY_ADDR" --lab-dir "$LAB" \
       --agents "$(IFS=,; echo "${AGENTS[*]}")" >/tmp/knoot-relay.log 2>&1 &
